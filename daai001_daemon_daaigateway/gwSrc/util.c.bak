@@ -1,0 +1,639 @@
+
+#include "util.h"
+#include "format.h"
+
+void ITRI_Hex2Str( uint8_t *pStr, uint8_t decValue  ){
+char gaHexValue[]="0123456789abcdef";
+uint8_t num;
+    for(num=1; num<2; num--){
+    	pStr[num] = gaHexValue[decValue & 0x0f];
+    	decValue = decValue >> 4;
+	}
+}
+
+void error(const char *msg)
+{
+    perror(msg);
+    exit(1);
+}
+
+int append_FCS(uint8_t * FrameBuffer){
+	int32_t idx=0;
+  uint8_t FCS;
+  uint8_t frm_len = 0;
+  
+  frm_len = FrameBuffer[FRAMEFORMAT_LOC_LEN];
+  
+  if(frm_len==0)
+  	return -1;
+  
+	FCS=FrameBuffer[FRAMEFORMAT_LOC_LEN];
+	for (idx=FRAMEFORMAT_LOC_API_ID;idx<frm_len+2;idx++)
+	{
+		FCS=FCS^FrameBuffer[idx];
+	}
+	FrameBuffer[frm_len+2]=FCS;
+
+		return 1;
+}
+
+int check_FCS(uint8_t * FrameBuffer){
+    int32_t idx=0;
+    uint8_t FCS;
+		uint8_t frm_len=0;
+
+		frm_len = FrameBuffer[FRAMEFORMAT_LOC_LEN];
+
+    FCS=FrameBuffer[FRAMEFORMAT_LOC_LEN];
+    for (idx=FRAMEFORMAT_LOC_API_ID;idx<frm_len+2;idx++)
+    {
+        FCS=FCS^FrameBuffer[idx];
+    }
+
+    if(FrameBuffer[frm_len+2] == FCS)
+        return 1;
+    else
+        return -1;
+}
+
+uint8_t get_group(void * frame){
+	uint8_t *in_frame = (void*)frame;
+
+	if(in_frame[FRAMEFORMAT_LOC_API_ID]=='\0')
+		return 0xff;
+	else	
+		return in_frame[FRAMEFORMAT_LOC_API_ID];
+}
+
+uint8_t get_api_cmd(void * frame){
+	uint8_t *in_frame = (void*)frame;
+
+	if(in_frame[FRAMEFORMAT_LOC_OPCODE]=='\0')
+		return 0xff;
+	else	
+		return in_frame[FRAMEFORMAT_LOC_OPCODE];
+}
+
+uint8_t * get_api_data(void* frame){
+	uint8_t *in_frame = (void*)frame;
+	
+	//return &in_frame[FRAMEFORMAT_LOC_DATAFIELD_START];	
+	return &in_frame[FRAMEFORMAT_LOC_DATA_LEN];
+}
+
+/*
+uint16_t get_sn(void* frame){
+	raw_pkg_t *in_frame = (void*)frame;
+
+	if(frame == NULL)
+		return 0xffff;
+
+	if(in_frame->sn == 0)
+		return 0xffff;
+	else
+		return in_frame->sn;
+}
+*/
+/*
+uint8_t get_dataLen(void* frame){
+	uint8_t *in_frame = (void*)frame;
+	
+	return in_frame[FRAMEFORMAT_LOC_LENGTH];
+}
+*/
+
+uint8_t get_cmd(void* frame){
+	uint8_t *in_frame = (void*) frame;
+	uint8_t rtn_cmd=0;
+
+	if (frame == NULL)
+		return 0xff;
+
+	rtn_cmd = in_frame[FRAMEFORMAT_LOC_DATA_CMD_RTN];
+	
+		return rtn_cmd;
+
+}
+
+uint8_t get_frameLen(void* frame){
+	uint8_t *in_frame = (void*) frame;
+	//uint16_t rtn_len=0;
+	uint8_t rtn_len=0;
+
+  //rtn_len = in_frame[FRAMEFORMAT_LOC_LEN_H] << 8;
+  //rtn_len += in_frame[FRAMEFORMAT_LOC_LEN_L];	
+	
+	rtn_len = in_frame[FRAMEFORMAT_LOC_LEN];
+	
+	if (rtn_len ==0)
+		return -1;
+	else
+		return (rtn_len);
+
+}
+
+/*
+uint8_t build_gpio_rtn_template(struct _RAW_PKG* in_pkg, uint8_t fill_value){
+	
+	in_pkg->sync = SYNC_SYMBOL;
+
+	if(get_group((void*)in_pkg) == WB_PKG_TYPE_SOLAR_GPIO_READ){
+		in_pkg->uniFrame.Solar_GPIOReadRsp.GroupId=OPGROUP_GPIO;
+		in_pkg->uniFrame.Solar_GPIOReadRsp.OpCode=OPCODE_GPIOREAD_RSP;
+		in_pkg->uniFrame.Solar_GPIOReadRsp.Length=1;
+		in_pkg->uniFrame.Solar_GPIOReadRsp.ReturnCode=RETURN_CODE_SUCCESS;
+		in_pkg->uniFrame.Solar_GPIOReadRsp.Value=fill_value;
+
+		return 0;
+	}
+	else if(get_group((void*)in_pkg) == WB_PKG_TYPE_SOLAR_GPIO_WRITE){
+		in_pkg->uniFrame.Solar_GPIOWriteConf.GroupId=OPGROUP_GPIO;
+		in_pkg->uniFrame.Solar_GPIOWriteConf.OpCode=OPCODE_GPIOWRITE_CONF;
+		in_pkg->uniFrame.Solar_GPIOWriteConf.Length=1;
+		in_pkg->uniFrame.Solar_GPIOWriteConf.ReturnCode=RETURN_CODE_SUCCESS;
+
+		return 0;
+	}
+	else{
+		printf("build_gpio_rtn_template failed !!\n");
+		return -1;
+	}
+}
+*/
+
+
+uint8_t create_rtn_template(raw_pkg_t* in_pkg){
+
+	in_pkg->sync = SYNC_SYMBOL;
+	in_pkg->len = 0;
+
+	switch(get_group((void*)in_pkg)){
+		case WB_PKG_TYPE_SOLAR_GPIO_READ_RSP:
+			in_pkg->len = sizeof(struct _Solar_GPIOReadRsp);	
+			in_pkg->uniFrame.Solar_GPIOReadRsp.GroupId=OPGROUP_GPIO;
+			in_pkg->uniFrame.Solar_GPIOReadRsp.OpCode=OPCODE_GPIOREAD_RSP;
+			in_pkg->uniFrame.Solar_GPIOReadRsp.Length=2;
+			//in_pkg->uniFrame.Solar_GPIOReadRsp.ReturnCode=RETURN_CODE_SUCCESS;
+  	
+			break;
+			
+		case WB_PKG_TYPE_SOLAR_GPIO_WRITE_CONF:
+			in_pkg->len = sizeof(struct _Solar_GPIOWriteConf);
+			in_pkg->uniFrame.Solar_GPIOWriteConf.GroupId=OPGROUP_GPIO;
+			in_pkg->uniFrame.Solar_GPIOWriteConf.OpCode=OPCODE_GPIOWRITE_CONF;
+			in_pkg->uniFrame.Solar_GPIOWriteConf.Length=1;
+			//in_pkg->uniFrame.Solar_GPIOWriteConf.ReturnCode=RETURN_CODE_SUCCESS;
+  	
+			break;
+
+		case WB_PKG_TYPE_SOLAR_VIDEO_CONF:
+			in_pkg->len = sizeof(struct _Solar_VideoCtrlReq);
+			in_pkg->uniFrame.Solar_VideoCtrlReq.GroupId=OPGROUP_GPIO;
+			in_pkg->uniFrame.Solar_VideoCtrlReq.OpCode=OPCODE_VIDEOCTRL_CONF;
+			in_pkg->uniFrame.Solar_VideoCtrlReq.Length=1;
+			//in_pkg->uniFrame.Solar_GPIOWriteConf.ReturnCode=RETURN_CODE_SUCCESS;
+  	
+			break;
+
+		case WB_PKG_TYPE_SOLAR_ENERGYREAD_RSP:
+		  in_pkg->len = sizeof(struct _Solar_EnergyReadRsp);
+			in_pkg->uniFrame.Solar_EnergyReadRsp.OpCode=OPCODE_GPIOREAD_RSP;
+			in_pkg->uniFrame.Solar_EnergyReadRsp.Length=0;
+			//in_pkg->uniFrame.Solar_EnergyReadRsp.ReturnCode=RETURN_CODE_SUCCESS;
+			//in_pkg->uniFrame.Solar_EnergyReadRsp.Value=fill_value;
+			
+			break;
+		default:
+			printf("build_gpio_rtn_template failed !!\n");
+			return -1;
+	}
+	return 1;
+}
+
+int inv_meta_data_dump( inverter_info_t * data_ptr){
+	int i;
+	
+	double total_p, power_l; 
+	
+	if(!data_ptr)
+		return 0;
+	
+	// w85
+	//switch_bytes(&data_ptr->W_0x85, 1);
+	printf("W85 = 0x%x\n",data_ptr->W_0x85);
+	
+	
+	data_ptr->brand_name[15] = '\0';
+	data_ptr->type_name[15] = '\0';
+	data_ptr->sn_name[15] = '\0';
+	printf("Brand Name = %s\n",data_ptr->brand_name);
+	printf("Tyte Name = %s\n",data_ptr->type_name);
+	printf("SN Name = %s\n",data_ptr->sn_name);
+	
+/*
+	printf("W_0x17[0] = 0x%x\n", data_ptr->W_0x17[0]);
+	printf("W_0x17[1] = 0x%x\n", data_ptr->W_0x17[1]);
+	
+	printf("W_0x12 = 0x%x\n", data_ptr->W_0x12);
+	printf("W_0x56 = 0x%x\n", data_ptr->W_0x56);
+	printf("W_0x86 = 0x%x\n", data_ptr->W_0x86);
+	printf("W_0x83 = 0x%x\n", data_ptr->W_0x83);
+*/
+	
+	// Total output time
+	printf("Total output time = %d:%d:%d\n", data_ptr->inverter_meta_data.TIME_HR_CNT, data_ptr->inverter_meta_data.TIME_MIN_CNT, data_ptr->inverter_meta_data.TIME_SEC_CNT );
+	
+	// Total Yield
+	
+	total_p = data_ptr->inverter_meta_data.TOTAL_POWER_H;
+	total_p = total_p*1000;
+	
+	power_l = data_ptr->inverter_meta_data.TOTAL_POWER_L;
+	power_l = power_l*0.1;
+	
+	total_p +=power_l;
+	printf("Energy Generated = %.2f kWh\n", total_p );
+	
+	total_p = total_p * 5;
+
+	// Earning = Total Yield * 5
+	printf("Earning = NT$ %.2f \n", total_p);
+	
+	// Pac
+	printf("AC Total Power = %d W\n", data_ptr->inverter_meta_data.Pac );
+	
+	// Pdc
+	printf("DC Total Power = %d W\n", data_ptr->inverter_meta_data.Pdc );
+	
+	//puts("Raw data of meta_data:\n");
+	printf("\n");
+	for(i=0; i<98; i++){
+		printf("0x%x ",((uint16_t*) &(data_ptr->inverter_meta_data.State))[i]);
+	}
+	
+	return 1;
+}
+
+int update_inv_msg2host(inverter_msg2host_t *msg2host, inverter_info_t *inverter_info){
+	
+	msg2host->state_code = (uint8_t)inverter_info->inverter_meta_data.State;
+	memcpy(msg2host->brand_name, inverter_info->brand_name, 16);
+	memcpy(msg2host->type_name, inverter_info->type_name, 16);
+	memcpy(msg2host->sn_name, inverter_info->sn_name, 16);
+
+	msg2host->total_hr_h = (uint8_t)(inverter_info->inverter_meta_data.TIME_HR_CNT >> 8);
+	msg2host->total_hr_l = (uint8_t)(inverter_info->inverter_meta_data.TIME_HR_CNT & 0x00ff);
+	msg2host->total_min_h = (uint8_t)(inverter_info->inverter_meta_data.TIME_MIN_CNT >> 8);
+	msg2host->total_min_l = (uint8_t)(inverter_info->inverter_meta_data.TIME_MIN_CNT & 0x00ff);
+	msg2host->gen_H_h = (uint8_t)(inverter_info->inverter_meta_data.TOTAL_POWER_H >> 8);
+	msg2host->gen_H_l = (uint8_t)(inverter_info->inverter_meta_data.TOTAL_POWER_H & 0x00ff);
+	msg2host->gen_L_h = (uint8_t)(inverter_info->inverter_meta_data.TOTAL_POWER_L >> 8);
+	msg2host->gen_L_l = (uint8_t)(inverter_info->inverter_meta_data.TOTAL_POWER_L & 0x00ff);
+	msg2host->pac_h = (uint8_t)(inverter_info->inverter_meta_data.Pac >> 8);
+	msg2host->pac_l = (uint8_t)(inverter_info->inverter_meta_data.Pac & 0x00ff);
+	msg2host->pdc_h = (uint8_t)(inverter_info->inverter_meta_data.Pdc >> 8);
+	msg2host->pdc_l = (uint8_t)(inverter_info->inverter_meta_data.Pdc & 0x00ff);
+
+	return 1;
+}
+
+int update_inv_msg2host_new(inverter_msg2host_new_t *msg2host, inverter_info_t *inverter_info, uint8_t invId){
+	
+	msg2host->state_code = (uint8_t)inverter_info->inverter_meta_data.State;
+	msg2host->inv_id = invId;
+	memcpy(msg2host->brand_name, inverter_info->brand_name, 16);
+	memcpy(msg2host->type_name, inverter_info->type_name, 16);
+	memcpy(msg2host->sn_name, inverter_info->sn_name, 16);
+
+	msg2host->total_hr = inverter_info->inverter_meta_data.TIME_HR_CNT;
+	msg2host->total_min = inverter_info->inverter_meta_data.TIME_MIN_CNT;
+	msg2host->total_sec = inverter_info->inverter_meta_data.TIME_SEC_CNT;
+	msg2host->total_gen_h = inverter_info->inverter_meta_data.TOTAL_POWER_H;
+	msg2host->total_gen_l = inverter_info->inverter_meta_data.TOTAL_POWER_L;
+	msg2host->pac = inverter_info->inverter_meta_data.Pac;
+	msg2host->pdc = inverter_info->inverter_meta_data.Pdc;
+
+	return 1;
+}
+
+int update_inv_msg2host_delta(inverter_msg2host_delta_t *data, inverter_delta_raw_t *inverter_info, uint8_t invId){
+	
+	data->inverterId							= (uint16_t)invId												;
+	data->inverterStatus			  	= inverter_info->inverterStatus			    ;
+	data->reconnectedTime					= inverter_info->reconnectedTime				;
+	data->DC_measurementIndex			= inverter_info->DC_measurementIndex		;
+	data->DC_voltage							= inverter_info->DC_voltage						  ;
+	data->DC_current							= inverter_info->DC_current						  ;
+	data->DC_wattage							= inverter_info->DC_wattage						  ;
+	data->DC_frequency						= inverter_info->DC_frequency					  ;
+	data->DC_percentage						= inverter_info->DC_percentage					;
+	data->DC_redundantVoltage			= inverter_info->DC_redundantVoltage		;
+	data->DC_redundantFrequency		= inverter_info->DC_redundantFrequency	;
+	data->DC_adcVoltage						= inverter_info->DC_adcVoltage					;
+	data->DC_adcCurrent						= inverter_info->DC_adcCurrent					;
+	data->DC_adcWattage						= inverter_info->DC_adcWattage					;
+	data->DC_adcRedundantVoltage	= inverter_info->DC_adcRedundantVoltage ;
+	data->todayWh_Low							= inverter_info->todayWh_Low						;
+	data->todayWh_High						= inverter_info->todayWh_High					  ;
+	data->todayRuntime_Low				= inverter_info->todayRuntime_Low			  ;
+	data->todayRuntime_High				= inverter_info->todayRuntime_High			;
+	data->lifeWh_Low							= inverter_info->lifeWh_Low						  ;
+	data->lifeWh_High							= inverter_info->lifeWh_High						;
+	data->lifeRuntime_Low					= inverter_info->lifeRuntime_Low				;
+	data->lifeRuntime_High				= inverter_info->lifeRuntime_High			  ;
+
+	data->delta5k_AmbTemp 				= inverter_info->delta5k_AmbTemp				;
+	data->delta5k_BoostHsTemp 		= inverter_info->delta5k_BoostHsTemp		;
+	data->delta5k_InvHsTemp 			= inverter_info->delta5k_InvHsTemp			;
+	
+	data->AC_measurementIndex			= inverter_info->AC_measurementIndex		;
+	data->AC_voltage							= inverter_info->AC_voltage						  ;
+	data->AC_current							= inverter_info->AC_current						  ;
+	data->AC_wattage							= inverter_info->AC_wattage						  ;
+	data->AC_frequency						= inverter_info->AC_frequency					  ;
+	data->AC_percentage						= inverter_info->AC_percentage					;
+	data->AC_redundantVoltage			= inverter_info->AC_redundantVoltage		;
+	data->AC_redundantFrequency		= inverter_info->AC_redundantFrequency	;
+	data->AC_adcVoltage						= inverter_info->AC_adcVoltage					;
+	data->AC_adcCurrent						= inverter_info->AC_adcCurrent					;
+	data->AC_adcWattage						= inverter_info->AC_adcWattage					;
+	data->AC_adcRedundantVoltage	= inverter_info->AC_adcRedundantVoltage ;
+
+	data->eventIndex							= inverter_info->eventIndex							;
+	data->event0									= inverter_info->eventOff0							;
+	data->event1									= inverter_info->eventOff1							;
+
+	return 1;
+}
+
+int convert_invmsg_to_asci(char *buff, inverter_msg2host_t* msg2host){
+	int n;
+	
+	n = sprintf(buff, "%d,", msg2host->state_code); 
+	buff += n;
+	
+	n = sprintf(buff, "%s,", msg2host->brand_name); 
+	buff += n;	
+	n = sprintf(buff, "%s,", msg2host->type_name); 
+	buff += n;
+	n = sprintf(buff, "%s,", msg2host->sn_name); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->total_hr_h); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->total_hr_l); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->total_min_h); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->total_min_l); 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->gen_H_h); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->gen_H_l); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->gen_L_h); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->gen_L_l); 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->pac_h); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->pac_l); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->pdc_h); 
+	buff += n;
+	n = sprintf(buff, "%d", msg2host->pdc_l); 
+	buff += n;
+	
+	buff[0] = '\0';
+	
+	return 1; 
+}
+
+int convert_invmsg_to_asci_new(char *buff, inverter_msg2host_new_t* msg2host){
+	int n;
+	double tmp_gen, tmp_gen_h, tmp_gen_l;
+
+	tmp_gen_h = (uint32_t)msg2host->total_gen_h;
+	tmp_gen_h = tmp_gen_h * 1000;
+	tmp_gen_l = (uint32_t)msg2host->total_gen_l;
+	tmp_gen_l = tmp_gen_l /10;
+
+	tmp_gen = tmp_gen_h + tmp_gen_l;
+	
+	n = sprintf(buff, "%d,", msg2host->state_code); 
+	buff += n;
+	n = sprintf(buff, "%.3d,", msg2host->inv_id); 
+	buff += n;
+	n = sprintf(buff, "%s,", msg2host->brand_name); 
+	buff += n;	
+	n = sprintf(buff, "%s,", msg2host->type_name); 
+	buff += n;
+	n = sprintf(buff, "%s,", msg2host->sn_name); 
+	buff += n;
+	n = sprintf(buff, "%d:", msg2host->total_hr); 
+	buff += n;
+	n = sprintf(buff, "%d:", msg2host->total_min); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->total_sec); 
+	buff += n;
+	n = sprintf(buff, "%.2f,", tmp_gen); 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->pac); 
+	buff += n;
+	n = sprintf(buff, "%d", msg2host->pdc); 
+	buff += n;
+	
+	buff[0] = '\0';
+	
+	return 1; 
+	
+}
+
+
+int convert_invmsg_to_asci_delta(char *buff, inverter_msg2host_delta_t* msg2host){
+	int n;
+	
+	double tmp_value;
+	
+	n = sprintf(buff, "%.3d,", msg2host->inverterId); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->inverterStatus);  // 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->reconnectedTime);  // unit: second
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->DC_measurementIndex); 
+	buff += n;	
+	tmp_value = (double)msg2host->DC_voltage;	// 0.1V
+	tmp_value = tmp_value /10;
+	n = sprintf(buff, "%.1f,", tmp_value); 
+	buff += n;
+	tmp_value = (double)msg2host->DC_current; // 0.01A
+	tmp_value = tmp_value /100;
+	n = sprintf(buff, "%.2f,", tmp_value); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->DC_wattage);	// 1W
+	buff += n;
+	tmp_value = (double)msg2host->DC_frequency; // 0.01Hz
+	tmp_value = tmp_value /100;
+	n = sprintf(buff, "%.2f,", tmp_value); 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->DC_percentage);	// 1% 
+	buff += n;	
+	tmp_value = (double)msg2host->DC_redundantVoltage; // 0.1V
+	tmp_value = tmp_value /10;
+	n = sprintf(buff, "%.1f,", tmp_value);	 // 0.1V
+	buff += n;	
+	tmp_value = (double)msg2host->DC_redundantFrequency; // 0.01Hz
+	tmp_value = tmp_value /100;	
+	n = sprintf(buff, "%.2f,", tmp_value); 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->DC_adcVoltage);	// 1 ADC count 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->DC_adcCurrent);	// 1 ADC count
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->DC_adcWattage);  // 1 ADC count
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->DC_adcRedundantVoltage);  // 1 ADC count
+	buff += n;
+	tmp_value = (double)msg2host->todayWh_High;
+	tmp_value = tmp_value * 65536;
+	tmp_value += (double)msg2host->todayWh_Low;
+	//tmp_value = tmp_value * 10;
+	n = sprintf(buff, "%.0f,", tmp_value); // 10Wh
+	buff += n;	
+	tmp_value = (double)msg2host->todayRuntime_High;
+	tmp_value = tmp_value * 65536;
+	tmp_value += (double)msg2host->todayRuntime_Low;
+	n = sprintf(buff, "%.0f,", tmp_value); // 1 sec
+	buff += n;	
+	tmp_value = (double)msg2host->lifeWh_High;
+	tmp_value = tmp_value * 65536;
+	tmp_value += (double)msg2host->lifeWh_Low;
+	//tmp_value = tmp_value * 10;
+	n = sprintf(buff, "%.0f,", tmp_value); // 10Wh
+	buff += n;	
+	tmp_value = (double)msg2host->lifeRuntime_High;
+	tmp_value = tmp_value * 65536;
+	tmp_value += (double)msg2host->lifeRuntime_Low;
+	n = sprintf(buff, "%.0f,", tmp_value); // 1 sec
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->delta5k_AmbTemp);  // 1 C
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->delta5k_BoostHsTemp);  // 1 C
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->delta5k_InvHsTemp);  // 1 C
+	buff += n;
+	
+	n = sprintf(buff, "%d,", msg2host->AC_measurementIndex); 
+	buff += n;	
+	tmp_value = (double)msg2host->AC_voltage;	// 0.1V
+	tmp_value = tmp_value /10;
+	n = sprintf(buff, "%.1f,", tmp_value);
+	buff += n;
+	tmp_value = (double)msg2host->AC_current; // 0.01A
+	tmp_value = tmp_value /100;
+	n = sprintf(buff, "%.2f,", tmp_value); 
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->AC_wattage);	// 1W
+	buff += n;
+	tmp_value = (double)msg2host->AC_frequency; // 0.01Hz
+	tmp_value = tmp_value /100;
+	n = sprintf(buff, "%.2f,", tmp_value); 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->AC_percentage);	// 1% 
+	buff += n;	
+	tmp_value = (double)msg2host->AC_redundantVoltage; // 0.1V
+	tmp_value = tmp_value /10;
+	n = sprintf(buff, "%.1f,", tmp_value);	 // 0.1V
+	buff += n;	
+	tmp_value = (double)msg2host->AC_redundantFrequency; // 0.01Hz
+	tmp_value = tmp_value /100;	
+	n = sprintf(buff, "%.2f,", tmp_value); 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->AC_adcVoltage);	// 1 ADC count 
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->AC_adcCurrent);	// 1 ADC count
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->AC_adcWattage);  // 1 ADC count
+	buff += n;	
+	n = sprintf(buff, "%d,", msg2host->AC_adcRedundantVoltage);  // 1 ADC count
+	buff += n;
+	
+	n = sprintf(buff, "%d,", msg2host->eventIndex);  // 1 ADC count
+	buff += n;
+	n = sprintf(buff, "%d,", msg2host->event0);  // 1 ADC count
+	buff += n;
+	n = sprintf(buff, "%d", msg2host->event1);  // 1 ADC count
+	buff += n;
+	
+	buff[0] = '\0';
+	
+	return 1; 
+	
+}
+
+/*
+int getbaud(int fd) 
+{
+    struct termios termAttr;
+    int inputSpeed = -1;
+    speed_t baudRate;
+    tcgetattr(fd, &termAttr);
+    // Get the input speed.                              
+    baudRate = cfgetispeed(&termAttr);
+    switch (baudRate) 
+    {
+        case B0:      inputSpeed = 0; break;
+        case B50:     inputSpeed = 50; break;
+        case B110:    inputSpeed = 110; break;
+        case B134:    inputSpeed = 134; break;
+        case B150:    inputSpeed = 150; break;
+        case B200:    inputSpeed = 200; break;
+        case B300:    inputSpeed = 300; break;
+        case B600:    inputSpeed = 600; break;
+        case B1200:   inputSpeed = 1200; break;
+        case B1800:   inputSpeed = 1800; break;
+        case B2400:   inputSpeed = 2400; break;
+        case B4800:   inputSpeed = 4800; break;
+        case B9600:   inputSpeed = 9600; break;
+        case B19200:  inputSpeed = 19200; break;
+        case B38400:  inputSpeed = 38400; break;
+        case B115200: inputSpeed = 115200; break;
+    }
+    return inputSpeed;
+}
+*/
+
+
+int isready(int fd)
+{
+	int rc;
+  fd_set fds;
+  struct timeval tv;
+
+  FD_ZERO(&fds);
+  FD_SET(fd,&fds);
+  tv.tv_sec = 3;
+  tv.tv_usec = 0;
+
+  	rc = select(fd+1,&fds,NULL,NULL,&tv);
+
+  if(rc < 0)
+     return FD_ISSET(fd,&fds) ? 1 : 0;
+  else if(rc==0)
+  	return 0;
+  else
+  	return 0;
+}
+
+void switch_bytes(uint8_t* data_ptr, int len){
+	uint8_t tmp_byte;
+	int i;
+	
+	for(i=0; i < (len<<1); i=i+2){
+		tmp_byte = data_ptr[i+0];
+		data_ptr[i+0] = data_ptr[i+1];
+		data_ptr[i+1] = tmp_byte;
+	}
+}
+
+

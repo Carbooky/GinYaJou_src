@@ -1,0 +1,1 @@
+Tele=Chunghwa Telecom,Ccid=89886920031021102528,Rssi=Good

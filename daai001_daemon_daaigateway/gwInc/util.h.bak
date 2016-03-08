@@ -1,0 +1,41 @@
+#ifndef _UTIL
+#define _UTIL
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+
+#include "format.h"
+
+extern void ITRI_Hex2Str( uint8_t *pStr, uint8_t decValue);
+extern void error(const char *msg);
+extern int append_FCS(uint8_t * FrameBuffer);
+extern int check_FCS(uint8_t * FrameBuffer);
+
+extern uint8_t get_group(void* frame);
+extern uint8_t get_api_cmd(void* frame);
+//extern uint16_t get_sn(void* frame);
+//extern uint8_t get_dataLen(void* frame);
+extern uint8_t get_cmd(void* frame);
+extern uint8_t get_frameLen(void* frame);
+extern uint8_t * get_api_data(void* frame);
+//extern uint8_t build_gpio_rtn_template(raw_pkg_t *, uint8_t);
+extern uint8_t create_rtn_template(raw_pkg_t *);
+
+extern int inv_meta_data_dump( inverter_info_t * data_ptr);
+extern int update_inv_msg2host(inverter_msg2host_t *msg2host, inverter_info_t *inverter_info);
+extern int convert_invmsg_to_asci(char *buff, inverter_msg2host_t* msg2host);
+//extern int getbaud(int fd);
+extern int isready(int fd);
+extern void switch_bytes(uint8_t* data_ptr, int len);
+extern int convert_invmsg_to_asci_new(char* ,inverter_msg2host_new_t*);
+extern int convert_invmsg_to_asci_delta(char *buff, inverter_msg2host_delta_t* msg2host);
+extern int update_inv_msg2host_new(inverter_msg2host_new_t *msg2host, inverter_info_t *inverter_info, uint8_t invId);
+extern int update_inv_msg2host_delta(inverter_msg2host_delta_t *data, inverter_delta_raw_t *inverter_info, uint8_t invId);
+
+#endif
+

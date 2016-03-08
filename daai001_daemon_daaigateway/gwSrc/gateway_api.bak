@@ -1,0 +1,4075 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <netinet/in.h>
+#include <sys/wait.h>
+
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <netdb.h> 
+#include <linux/netdevice.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <sys/stat.h>
+//#include "libctools/transfer_utils.h"
+
+#include <libxml/parser.h>
+
+#include "gateway_api.h"
+
+//#include "mt81xx.h"
+#include "util.h"
+#include "protocols.h"
+
+//#include "ps_client.h"
+//#include "WBQueue.h"
+
+#include "cam_capture.h"
+
+#define PLATFORM_PC 1
+#define PLATFORM_TARGET 0
+
+#define GPIO_WRITABLE_BIT 0x0f
+#define PLATFORM PLATFORM_PC
+//#define PLATFORM PLATFORM_PC
+
+#define PORT_SRV 30000
+#define LENGTH 512
+#define BACKLOG 5
+
+#define INV_MSG_CRASH 2
+#define INV_MSG_CRC_ERR 3
+
+/********************
+* global defines  *
+*********************/
+//#define MODEMDEVICE "/dev/ttyUSB0"
+//#define INVERTER_BAUDRATE B9600
+#define XML_FILE_LOCATION "./Profiles/TR106_BaselineProfile.xml"
+#define TRUE 1
+#define FALSE 0
+#define bool_t _Bool
+
+#define PKT_REAL 1
+
+#define PLATFORMISPC 0
+
+#define GPIO_WIRTABLE_BIT 0x07
+
+#define ALARM_BIT 					0
+#define INV_AUTO_BIT 				1
+#define INV_FORCE_BIT				2
+#define SYSTEM_REBOOT_BIT 	3
+#define UPDATE_PERIOD_LBIT	4
+#define UPDATE_PERIOD_HBIT	5
+#define SYSTEM_STATUS_LBIT  6
+#define SYSTEM_STATUS_HBIT  7
+
+#define STATUS_ALARM_IND_ENABLE 			(1 << ALARM_BIT)
+#define STATUS_INV_AUTO_SCAN_ENABLE 	(1 << INV_AUTO_BIT)
+#define STATUS_INV_FORCE_SCAN 				(1 << INV_FORCE_BIT)
+#define STATUS_SYSTEM_REBOOT_BIT 			(1 << SYSTEM_REBOOT_BIT)
+#define STATUS_UPDATE_PERIOD_2BIT 		((1 << UPDATE_PERIOD_LBIT) + (1 << UPDATE_PERIOD_HBIT))
+#define STATUS_SYSTEM_2BIT 						((1 << SYSTEM_STATUS_LBIT) + (1 << SYSTEM_STATUS_HBIT))
+
+int test_trigger=0;
+
+//inverter_info_t inverter_info;
+inverter_msg2host_t msg2host;
+sem_t sem_rs232, sem_alarm_stop, sem_alarm_start;
+uint8_t rs232_run_flag = 0;
+
+//msg2cloudServer_t msg2cloudServer;
+
+char info_3G[128]="Tele=N/A,Ccid=N/A,Rssi=N/A";
+char sys_MacAddr[18];
+char sys_IP[16];
+
+//char string_inv_info[67];  //num + 32addrs +1
+char sys_time[13];		//[MM][dd][hh][mm][yyyy] + 1
+//gGpioValue_t sys_GPIO;
+char alarm_enable = 0;
+char sys_ip_addr[16];
+bool_t sys_TimeStampEnable = TRUE;
+unsigned int sys_video = 2;
+unsigned int sys_audio = 2;
+volatile char sys_status = STATUS_ALARM_IND_ENABLE | STATUS_INV_AUTO_SCAN_ENABLE | 0x00 | 0x40;
+
+char restart_cnt[32]="";
+
+bool_t status_alarm_snapshot_enable = TRUE;
+
+volatile int update_acs_interval = UPDATE_ACS_INTERVAL;
+gGpioValue_t get_Gpiovalue = 0;
+
+gBackupState_t curr_wr_state = SYS_INFO_INIT;
+
+//void (*alarm_func)(gGpioValue_t alarmGpio);
+alarm_func_t alarm_func = NULL;
+audio_func_t audio_func;
+ind_func_t xml_func_ind = NULL;
+ind_func_t xml_func_update = NULL;
+
+scan_total_inv_info_t sys_inv_info_all;
+scan_inv_info_t sys_inv_info_all1, sys_inv_info_all2, sys_inv_info_all3, sys_inv_info_all4;
+sem_t sem_invScan1, sem_invScan2, sem_invScan3, sem_invScan4;
+sem_t sem_waitInvScanFin1, sem_waitInvScanFin2, sem_waitInvScanFin3, sem_waitInvScanFin4;
+pthread_t summary_scan_info_sem;
+scan_channel_info_t* tmp_channel_info_p1, *tmp_channel_info_p2, *tmp_channel_info_p3, *tmp_channel_info_p4;
+
+//static spinlock_t scan_total_inv_lock = SPIN_LOCK_UNLOCKED;
+pthread_spinlock_t scan_total_inv_lock;
+/*
+
+scan_channel_info_t thread_struct_ch1_body = {MODEMDEVICE_RF, USE_ENERSOLIS, &sem_invScan1, &sem_waitInvScanFin1, &sys_inv_info_all};
+
+scan_inv_info_t sys_inv_info_all2;
+sem_t sem_invScan2;
+sem_t sem_waitInvScanFin2;
+scan_channel_info_t thread_struct_ch2_body = {MODEMDEVICE_RJ45, USE_ENERSOLIS, &sem_invScan2, &sem_waitInvScanFin2, &sys_inv_info_all2};
+*/
+//upload_func_t xml_func_upload = NULL;
+
+pthread_t thread_update_scan, thread_update_scan1, thread_update_scan2, thread_senpu_manager, thread_gpio, thread_alarm, thread_timer, thread_inverter_manager1, thread_inverter_manager2, thread_inverter_manager;
+
+/***************
+*	Internal APIs
+****************/
+int set_sys_time(char * new_dateTime);
+int reg_audCallBack( audio_func_t reg_func);
+int reg_indCallBack( alarm_func_t reg_func);
+
+void *thread_handle_update_scan(void *argu);
+//void *thread_handle_update_scan_ch1(void *argu);
+//void *thread_handle_update_scan_ch2(void *argu);
+void *thread_handle_manager_senpu(void *argu);
+void *thread_summary_scan_info(void *argu);
+
+void *thread_handle_manager_inverter(void *argu);
+void *thread_handle_manager_inverter_ch1(void *argu);
+void *thread_handle_manager_inverter_ch2(void *argu);
+void *thread_handle_gpio(void *argu);
+void *thread_handle_alarm(void *argu);
+void *thread_handle_timer(void *argu);
+
+void *thread_redundant_host_control(void *argu);
+
+typedef enum{
+	ALARM_STATE_INIT = 0,
+	ALARM_STATE_RDY,
+	ALARM_STATE_TRIGGERED,
+	ALARM_STATE_EXPIRED,
+	ALARM_STATE_WEB_STOP_PRE,
+	ALARM_STATE_WEB_STOP
+}trigger_state_t;
+
+trigger_state_t alarm_state = ALARM_STATE_INIT;
+
+typedef enum{
+	ALARM_EVENT_TRIGGER = 1,
+	ALARM_EVENT_UNTRIGGERED,
+	ALARM_EVENT_TIMEOUT,
+	ALARM_EVENT_WEBSTOP,
+	ALARM_EVENT_ADV
+}trigger_event_t;
+
+int countdown_secs = 0;
+
+
+#define COUNTDOWN_WEBSTOP2RESUME 180
+#define COUNTDOWN_EXPIRE2READY 	 600
+#define COUNTDOWN_TRIGGER2EXPIRE 600
+
+int alarm_state_change(trigger_state_t *curr_state, trigger_event_t event){
+	
+	printf("Event = %d, Alarm State =%d -->", event, *curr_state);
+
+	switch(*curr_state){
+		case ALARM_STATE_INIT:
+			if(event == ALARM_EVENT_ADV)
+				*curr_state = ALARM_STATE_RDY;
+			break;
+		case ALARM_STATE_RDY:
+			if(event == ALARM_EVENT_TRIGGER)
+				*curr_state = ALARM_STATE_TRIGGERED;
+			break;
+		case ALARM_STATE_TRIGGERED:
+			if(event == ALARM_EVENT_TIMEOUT)
+				*curr_state = ALARM_STATE_EXPIRED;
+			else if (event == ALARM_EVENT_WEBSTOP)
+				*curr_state = ALARM_STATE_WEB_STOP_PRE;
+			else if (event == ALARM_EVENT_UNTRIGGERED)
+				*curr_state = ALARM_STATE_RDY;
+			break;
+		case ALARM_STATE_EXPIRED:
+			if(event == ALARM_EVENT_WEBSTOP)
+				*curr_state = ALARM_STATE_WEB_STOP_PRE;
+			else if(event == ALARM_EVENT_TIMEOUT)
+				*curr_state = ALARM_STATE_RDY;
+			break;
+		case ALARM_STATE_WEB_STOP_PRE:
+			if(event == ALARM_EVENT_ADV)
+				*curr_state = ALARM_STATE_WEB_STOP;
+			break;
+		case ALARM_STATE_WEB_STOP:
+			if(event == ALARM_EVENT_TIMEOUT)
+				*curr_state = ALARM_STATE_RDY;
+			break;
+		default:;
+	}
+
+	printf("%d \n", *curr_state);
+
+	return 1;
+}
+/*********** END Internal APIs **************/
+
+#define SERVER_IP_PORT "http://csac.dtdns.net:8084/"
+#define IMAGEDIR "upload/"
+
+#if 0
+bool_t senpu_CamCapture(char* gwid){
+	int n = 5;
+	char tmp_time[15]="";
+	bool_t bret;
+
+	char* targetFileName[5];
+	char targetFileName1[256] = "";
+	char targetFileName2[256] = "";
+	char targetFileName3[256] = "";
+	char targetFileName4[256] = "";
+	char targetFileName5[256] = "";
+
+	targetFileName[0] = targetFileName1;
+	targetFileName[1] = targetFileName2;
+	targetFileName[2] = targetFileName3;
+	targetFileName[3] = targetFileName4;
+	targetFileName[4] = targetFileName5;
+
+	char strUploadPath[256] = "";
+	//char targetFileName[256] = "";
+	char full_filename[256] = "";
+	int k;
+	int uploadResult = -1;
+
+	// first stop the streaming video
+	setStreamVideo("0");
+	//sleep(1);
+	
+	while(n>0){
+    	syscall_getRsp("date +\"%Y%m%d%H%M%S\"", tmp_time);
+    	tmp_time[14] = '\0';
+		
+    	//sprintf(targetFileName,"image_%llu.jpg", Time_getCurrentMicrosecond());
+
+	printf("This time n = %d\n", n);
+
+    	switch(n){
+    	case 5:
+    		sprintf(targetFileName[4],"%s.jpg", tmp_time);
+    		break;
+    	case 4:
+    		sprintf(targetFileName[3],"%s.jpg", tmp_time);
+    		break;
+    	case 3:
+    		sprintf(targetFileName[2],"%s.jpg", tmp_time);
+    		break;
+    	case 2:
+    		sprintf(targetFileName[1],"%s.jpg", tmp_time);
+    		break;
+    	case 1:
+    		sprintf(targetFileName[0],"%s.jpg", tmp_time);
+    		break;
+    		default:;
+    	}
+
+	
+	printf("after camcapture,slot =%d,  name = %s, IMAGEDIR=%s\n", n-1 ,targetFileName[n-1], IMAGEDIR);
+    	bret = CamCapture_startCapture(IMAGEDIR, targetFileName[n-1], "/dev/video0");
+	printf("after camcapture,slot =%d,  name = %s\n", n-1 ,targetFileName[n-1]);
+
+    	sleep(4);
+    	n--;
+	}
+
+	//sleep(1);
+	puts("start to upload!");
+
+		if (bret == TRUE) {
+			sprintf(strUploadPath, "%sSolarEnergy/upload_gateway_picture?id=%s&filename=%s", SERVER_IP_PORT, gwid, targetFileName[n-1]); // servlet URL for Dora, jcwang 20130807
+			printf("Test show the upload string:%s\n", strUploadPath);
+
+			for (k = 0; k < 3; k++)  // re-send 3 times
+					{
+				uploadResult = Transfer_uploadFile_multi(IMAGEDIR, targetFileName, 5, strUploadPath, "", "");
+
+				if (uploadResult == 0)
+					break;
+			}
+		}
+	
+	
+			// 20130731 jcwang
+			// whatever to delete image file
+			struct stat stFileInfo;
+
+			int intStat;
+			
+	n=5;
+	while(n>0){
+			sprintf(full_filename, "%s/%s", IMAGEDIR, targetFileName[n-1]);
+			intStat = stat(full_filename, &stFileInfo);
+			if (intStat == 0) {
+				printf("File Exist!\n");
+				if (stFileInfo.st_mode & S_IFREG) {
+					printf("Input is regular file. %s\n", full_filename);
+					// to delete
+					remove(full_filename);
+					printf("finish remove : %s", full_filename);
+				} else if (stFileInfo.st_mode & S_IFDIR) {
+
+				}
+			}
+	
+		usleep(100000);
+		n--;
+	}
+	puts("Finish photo upload!");
+
+	//sleep(1);
+	// restart the streaming video
+	setStreamVideo("1");
+
+    return bret;
+}
+#endif
+
+bool_t senpu_CamCapture(char* gwid){
+	(void) gwid;
+	return FALSE;
+}
+
+int isready_net(int fd)
+{
+	int rc;
+  fd_set fds;
+  struct timeval tv;
+
+  FD_ZERO(&fds);
+  FD_SET(fd,&fds);
+  tv.tv_sec = 1;
+  tv.tv_usec = 0;
+
+  	rc = select(fd+1,&fds,NULL,NULL,&tv);
+		printf("select rtn %d \n", rc);
+
+  if(rc < 0)
+     return FD_ISSET(fd,&fds) ? 1 : 0;
+  else if(rc==0)
+  	 return 0;
+  
+  return -1;
+}
+
+
+int senpu_GPIOSet(gGpioValue_t gpioValue){
+	
+	if(gpioValue == 1){
+		system("sudo ~/gpio/setGio16 1");
+		//puts("get gio==1");
+	}
+	else{
+		system("sudo ~/gpio/setGio16 0");
+		//puts("get gio==0");
+	}
+	
+	return 1;
+}
+
+int senpu_GPIOGet(gGpioValue_t *gpioValue){
+	char tmpValue[2];
+	char buff_syscall[128];
+	
+	//strcpy((char*)gpioValue, exec("cat /sys/class/gpio/gpio11/value"));
+	syscall_getRsp("sudo /home/pi/gpio/getGio15", buff_syscall);
+	strcpy(tmpValue, buff_syscall);
+	
+	*gpioValue = tmpValue[0] - '0';
+	
+	return 1;
+}
+
+
+void print_AcsMenu(void){
+	
+
+	printf("[1].(string)getGPIO\n");
+	printf("[2].(string)getEnergy(index)\n");
+	printf("[3].(string)getSysIp\n");
+	printf("[4].(string)getSysMac\n");
+	printf("[5].(string)getSysInv\n");
+	//printf("[6].(string)getSysTimeStampEnable\n");
+
+	printf("[7].(string)getAudio\n");
+	printf("[8].(string)getStreamVideo\n");
+	//printf("[9].(string)getSysTime\n");
+	printf("[10].(string)getSysStatus\n");
+	
+	printf("[11].(int)setSysInit(string)\n");
+	printf("[12].(int)setSysDispose\n");
+		
+	printf("[13].setGPIO(string)\n");
+	//printf(" \n");
+	//printf("[15].setSnapShot(string)\n");
+	printf("[16].setAudio(string)\n");
+	printf("[17].setStreamVideo(string)\n");
+	//printf("[18].setSysTime(string)\n");
+	printf("[19].setSysCtrl(string)\n");
+	//printf("[20].(string)getEnergy_instant(index)\n");
+	//printf("[21].(string)getSysInv_instant\n");
+
+}
+
+int senpu_SysCtrlSet(gSysCmd_t cmd, char *params){
+	
+	switch(cmd){
+		case SYS_SET_TIME:
+			set_sys_time(params);
+			break;
+		case SYS_SET_IND_CALLBACK:
+			reg_indCallBack((alarm_func_t)params);
+			break;
+		case SYS_SET_AUD_CALLBACK:
+			reg_audCallBack((audio_func_t)params);
+			break;
+		default:;
+	}
+	return 1;
+}
+
+
+int senpu_SnapShotSet(gSnapShot_t cmd, void *params){
+	//char file_name[10] = {'p','i','c','t','u','r','e'};
+	//char value=0;
+	(void) cmd;
+	(void) params;
+	
+	// do snap shot
+	
+	return 1;
+}
+
+
+#if 0
+int inverter_scan(scan_inv_info_t* inv_info){
+	struct termios options;
+
+  int fd_rs485;
+  //int fd_gpio88;
+
+  int bytes;
+
+
+  uint8_t rcv_buff[64];
+  uint8_t *bufptr;
+
+  int nbytes;
+
+  int i;
+	raw_485_t raw_485_pkg;
+	int req_size, rsp_size;
+
+
+  uint8_t rs232_timeout = FALSE;
+  uint8_t rcv_len;
+  
+  int tmp_i, valid_cnt=0;
+  bool_t tail_valid=FALSE, isASCII=FALSE;
+  uint8_t * tmp_bufp;
+	
+	uint16_t inv_addr=0 /*= 0x03*/, inv_reg2rd;
+	
+	inv_cmd_state_t inv_cmd_state = INV_CMD_STATE_INIT;
+	uint8_t cpy_size;
+	uint16_t * cpy_ptr=NULL;
+	
+	//int net_timeout_cnt;
+	
+	printf("In handle rs232 thread !!\n");
+
+	//
+	// Initial UART
+  fd_rs485 = open(MODEMDEVICE, O_RDWR| O_NOCTTY);
+  if(fd_rs485 == -1)
+  {
+      perror("open_port: Unable to open:");
+  }
+  else
+  {
+      fcntl(fd_rs485, F_SETFL, 0);
+      printf("hi again\n");
+  }
+  
+  tcgetattr(fd_rs485, &options);
+
+	bzero(&options, sizeof(options));
+    
+	options.c_cflag = INVERTER_BAUDRATE |CLOCAL | CREAD;//(CLOCAL | CREAD);
+  options.c_cflag &= ~PARENB;//|= ~PARENB;//&= ~PARENB;
+  options.c_cflag &= ~CSTOPB;//options.c_cflag &= ~CSTOPB;
+  options.c_cflag |= CS8;
+    
+  options.c_iflag = IGNPAR;
+  options.c_oflag &= ~OPOST;
+	options.c_lflag &= ~(ICANON|ECHO|ECHOE|ISIG);
+	options.c_cc[VMIN] = 0;		// read() return after receiving VMIN of 
+								// words, it works
+	options.c_cc[VTIME] = 1;
+
+	tcflush(fd_rs485, TCIFLUSH);
+  tcsetattr(fd_rs485, TCSANOW, &options);
+   
+	//printf("Current BaudRate=%d\n",getbaud(fd_rs485) );
+	
+	while(1){
+
+		switch (inv_cmd_state){
+
+		case INV_CMD_STATE_INIT:
+			puts("Rs232 State at initial");
+			inv_reg2rd = 0;
+			isASCII=FALSE;
+			inv_info->num = 0;
+		break;
+
+		case INV_CMD_STATE_RDY:
+			cpy_size = 0;
+			inv_reg2rd = 0;
+			isASCII=FALSE;
+		break;
+		
+		case INV_CMD_STATE_TIMEOUT:
+			cpy_size = 0;
+			inv_reg2rd = 0;
+		break;
+		
+		case INV_CMD_STATE_STOP:
+			cpy_size = 0;
+			inv_reg2rd = 0;
+		break;
+		
+		case INV_CMD_STATE_SCAN_RUN:
+			inv_reg2rd = 0x17;
+			inv_addr = inv_addr + 1;
+			isASCII=FALSE;
+		break;
+
+		case INV_CMD_STATE_SCAN_END:
+		//initial
+			cpy_ptr = NULL;
+			cpy_size = 0;
+			//sem_wait(&sem_rs232);	
+		break;
+		
+		default:
+		// display
+			printf("default state, inv_cmd_state=%d\n", inv_cmd_state);
+		// next
+			inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_STOP);
+		}	// switch case
+	//
+	// Does task, then update state
+	// 
+		
+		if (inv_cmd_state == INV_CMD_STATE_INIT)	{
+			//printf("RS232 Initial again !!\n");
+			//sleep(1);
+			inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_NORMAL);
+		}
+		else if(inv_cmd_state == INV_CMD_STATE_RDY)
+			inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_SCAN);
+		else if (inv_cmd_state == INV_CMD_STATE_TIMEOUT){
+				inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_STOP);
+		}
+		else if(inv_cmd_state == INV_CMD_STATE_SCAN_END)
+		{
+			puts("Finish Scan process!!\n");
+			
+			// dump message
+			
+			inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_STOP);
+			printf("To the end of Inverter probe !!\n");
+			
+			// break the while
+			break;
+		}
+		else if(inv_cmd_state == INV_CMD_STATE_STOP)
+		{
+			printf("Scan STOP !!\n");
+			return 0;
+			//inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_NORMAL);
+		}
+		else if(inv_cmd_state&0xf00)
+		{
+			// check if it reach the end
+			if(inv_addr > INV_MAX)
+				inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_END);
+			
+			bzero(&raw_485_pkg, sizeof(raw_485_pkg));
+			raw_485_pkg.pkt_type = mt81xx_cmd_read;	
+			req_size = 2;
+			if(create_mt81xx_cmd(&raw_485_pkg, inv_addr, inv_reg2rd , req_size)<0)
+				printf("Create Read Cmd to Rs485 failed!!\n");
+			if(append_CRC16(&raw_485_pkg)<0)
+				printf("Adding CRC16 error !!\n");
+    	
+    	printf("Scan inv# = %d\n", inv_addr);
+    	
+			i=0;
+
+			while(((uint8_t*)&(raw_485_pkg.uniFrame.im_mt81xx_format03))[i] != 0x0d){
+				//printf("%.2x ",((uint8_t*)&(raw_485_pkg.uniFrame.im_mt81xx_format03))[i]);
+				i++;
+			}
+			
+			//select Tx
+			//write(fd_gpio88, "1", 1);
+			write(fd_rs485, &(raw_485_pkg.uniFrame.im_mt81xx_format03), i+1);
+	  	
+	  	usleep(100);
+	  	
+			//process Rx
+	  	bufptr = rcv_buff;
+			nbytes=0;
+			bzero(bufptr, 64);
+			rs232_timeout=FALSE;
+	  	rsp_size = req_size*2 + 7;
+	  	
+	  	int net_timeout_cnt = 0;
+	  	//printf("rsp_size should be %d\n", rsp_size);
+	  	for(;;){ // do rs485 receiving during 3 second, or timeout
+	  	  	// check if there's data in com port, or time out
+				
+				if(net_timeout_cnt==2){
+	  				//rs232_timeout=TRUE;
+	  				puts("Crash");
+	  				rs232_timeout=INV_MSG_CRASH;
+				
+	  				break;
+	  		}
+	  		
+				// wait before read it !!
+				usleep(100000); //0.1 s
+				
+				// non-blocking read 
+	  	  bytes = read(fd_rs485, (char*)bufptr, rsp_size);	// it will always receive
+				nbytes +=bytes;
+				
+				if(bytes <= 0){		// get no data at all before timeout
+	  			rs232_timeout=INV_MSG_CRASH;
+	  			//puts("Scan Crash");
+	  			break;
+	  		}else if(rsp_size == nbytes){ // get exact data before timeout
+					rs232_timeout=FALSE;
+					break;
+				}else{		// get partial data, keep watching !!
+					rs232_timeout=FALSE;
+					//break;
+				}
+				
+				net_timeout_cnt ++;
+	  	}
+
+			valid_cnt=0;
+			rcv_len = 0;
+			
+			if(rs232_timeout==FALSE){
+				if(nbytes && (cpy_ptr!=NULL)){
+					// find 0x0a, check tail 0x0d
+					
+					for (tmp_i=0; tmp_i<nbytes; tmp_i++){
+
+						if(rcv_buff[tmp_i]==0x0a){
+							rcv_len = rcv_buff[tmp_i+3]; // 0x0a prefix is followed by addr, then length <--we want
+							tmp_bufp = rcv_buff + tmp_i; // tmp_bufp pointing to the SOF
+							//printf("tmp_bufp = %p\n", tmp_bufp);
+							
+							if(rcv_buff[tmp_i+rcv_len+6]==0x0d){
+								valid_cnt = rcv_len+6;
+								tail_valid=TRUE;
+								break;
+							}else{
+								valid_cnt = 0;
+								puts("pkt tail not valid !!");
+								tail_valid=FALSE;
+								break;
+							}
+						}
+					}
+					
+					if(check_CRC16((mt81xx_format_rtn_t *)tmp_bufp)>0){
+						//printf("receive RS485 packet with CRC correct !!\n");
+						
+						// copy the data
+						tmp_bufp += 3; // locate ptr to pointing "Byte Count"
+						
+						//printf("cpy_size = %d, *tmp_bufp = %d\n", cpy_size, *((uint8_t*)tmp_bufp));
+						if(tail_valid && ( cpy_size == *((uint8_t*)tmp_bufp) )){
+							tmp_bufp += 1;	// locate to data
+							
+							// switch bytes
+							if(!isASCII)		// if it is ASCII field, don't switch
+								switch_bytes((uint8_t*)tmp_bufp, cpy_size>>1);
+							
+							memcpy(cpy_ptr, tmp_bufp, cpy_size);
+							//printf("Get data 0x%.4x\n", cpy_ptr[0]);
+	  		  	}else
+	  		  		printf("copy size mismatch, copy abort, cpy_ptr == %d\n", sizeof(cpy_ptr));
+	  		  		
+						// modify count
+						nbytes = valid_cnt;
+						valid_cnt=0;					
+					
+					}else{
+						printf("receive RS485 packet with CRC error !!\n");	
+						
+					}
+				}
+			}	
+	  	
+			//change state
+			if(rs232_timeout==INV_MSG_CRASH){
+				inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_NORMAL);
+			}
+    	else if(rs232_timeout==FALSE){
+//		if((rs232_timeout==FALSE)||(rs232_timeout==INV_MSG_CRASH)){
+    		inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_NORMAL);	
+    		printf("Found inverter address=%d\n", inv_addr);
+    		inv_info->num = inv_info->num + 1;
+    		inv_info->addr[inv_info->num -1] = inv_addr;
+			}else{
+				printf("RS485 timeout !!\n");
+				inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_TIMEOUT);
+			}
+		}
+		else
+			inv_state_chg_next(&inv_cmd_state, INV_CMD_EVENT_NORMAL);
+		
+	}
+
+	close(fd_rs485);
+	//close(fd_gpio88);
+	puts("Close rs485fd, gpio88fd !!\n");
+	return -1;
+}
+#endif
+
+
+int senpu_AudioSet(gAudioCmd_t cmd, int value){
+	
+	(void) value;
+	
+	switch(cmd){
+		case AUDIO_SET_PLAYBACK_VOLUME:
+			break;
+		case AUDIO_SET_CAPTURE_VOLUME:
+			//SetAudioinVolume(&value_set, 1);
+			break;
+		case AUDIO_PLAY_FILE_DEFAULT:
+			// set the audio file to be alarm_1_16K.wav
+			system("mpg123 /mnt/ramdisk/alarm.wav");
+			break;
+		case AUDIO_PLAY_FILE_RECORD:		
+			// play the pre-recorded file
+			system("mpg123 /mnt/ramdisk/record.wav");
+			
+			break;
+		default:;
+	}
+	
+	return 1;
+}
+
+int senpu_StreamVideoSet(gVideoCmd_t cmd, int in_value){
+	
+	(void) in_value;
+
+	
+	switch(cmd){
+		case VIDEO_CMD_SET_VIDEO:
+
+		break;
+		default:;
+	}
+	return 1;
+}
+
+int create_server(void){
+	int sockfd; 
+	int nsockfd;
+	struct sockaddr_in addr_local; /* client addr */
+	struct sockaddr_in addr_remote; /* server addr */
+	char revbuf[LENGTH]; // Receiver buffer
+	char sdbuf[LENGTH];
+	socklen_t sin_size;
+	
+	/* Get the Socket file descriptor */
+	if((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1 )
+	{
+		//fprintf(stderr, "ERROR: Failed to obtain Socket Descriptor. (errno = %d)\n", errno);
+		printf("ERROR: Failed to obtain Socket Descriptor.");
+		exit(1);
+	}
+	else 
+		printf("[Server] Obtaining socket descriptor successfully.\n");
+
+	/* Fill the client socket address struct */
+	addr_local.sin_family = AF_INET; // Protocol Family
+	addr_local.sin_port = htons(PORT_SRV); // Port number
+	addr_local.sin_addr.s_addr = INADDR_ANY; // AutoFill local address
+	bzero(&(addr_local.sin_zero), 8); // Flush the rest of struct
+
+	/* Bind a special Port */
+	if( bind(sockfd, (struct sockaddr*)&addr_local, sizeof(struct sockaddr)) == -1 )
+	{
+		//fprintf(stderr, "ERROR: Failed to bind Port. (errno = %d)\n", errno);
+		printf("ERROR: Failed to bind Port.\n");
+		exit(1);
+	}
+	else 
+		printf("[Server] Binded tcp port %d in addr 127.0.0.1 sucessfully.\n",PORT_SRV);
+
+	/* Listen remote connect/calling */
+	if(listen(sockfd,BACKLOG) == -1)
+	{
+		//fprintf(stderr, "ERROR: Failed to listen Port. (errno = %d)\n", errno);
+		printf("ERROR: Failed to listen Port.\n");
+		exit(1);
+	}
+	else
+		printf ("[Server] Listening the port %d successfully.\n", PORT_SRV);
+
+
+	if ((nsockfd = accept(sockfd, (struct sockaddr *)&addr_remote, &sin_size)) == -1) {
+		//fprintf(stderr, "ERROR: Obtaining new Socket Despcritor. (errno = %d)\n", errno);
+		printf("ERROR: Obtaining new Socket Despcritor.\n");
+		exit(1);
+	}
+	else 
+		printf("[Server] Server has got connected from %s.\n", inet_ntoa(addr_remote.sin_addr));
+
+	int fr_block_sz = 0;
+	//fr_block_sz = recv(nsockfd, revbuf, LENGTH, 0);
+	fr_block_sz = recv(nsockfd, revbuf, 1, 0);
+	printf("Receive %d bytes from host, cmd=0x%x\n", fr_block_sz, revbuf[0]);
+	
+	sdbuf[0] = 'o';
+	sdbuf[1] = 'k';
+	send(nsockfd, sdbuf, 2, 0);
+	
+	close(nsockfd);
+	close(sockfd);
+	
+	return 1;
+}
+
+int reg_XmlIndCallBack(ind_func_t reg_func){
+	
+	if(!reg_func){
+		puts("reg_indCallBack failed, no callback funciton was specidied !!");
+		return -1;
+	}
+	
+	// set the pointer
+	xml_func_ind =  reg_func;
+	puts("Set XML indication callback function !!");
+	
+	return 1;	
+}
+
+int reg_XmlUpdateCallBack(ind_func_t reg_func){
+	
+	if(!reg_func){
+		puts("reg_updateCallBack failed, no callback funciton was specidied !!");
+		return -1;
+	}
+	
+	// set the pointer
+	xml_func_update =  reg_func;
+	puts("Set XML update indication callback function !!");
+	
+	return 1;	
+}
+
+int reg_indCallBack( alarm_func_t reg_func){
+	
+	if(!reg_func){
+		puts("reg_indCallBack failed, no callback funciton was specidied !!");
+		return -1;
+	}
+	
+	// set the pointer
+	alarm_func = /*(void (*)(gGpioValue_t))*/ reg_func;
+	puts("Set indication callback function !!");
+	
+	return 1;
+}
+
+int reg_audCallBack( audio_func_t reg_func){
+	
+	if(!reg_func){
+		puts("reg_audCallBack failed, no callback funciton was specidied !!");
+		return -1;
+	}
+	
+	// set the pointer
+	audio_func = reg_func;
+	puts("Set audio callback function !!");
+	
+	return 1;
+}
+
+int invIsFound(int item, int inv_num, char* inv_addr){
+	int ind = 0;
+	
+	while(ind<inv_num){
+		
+		if(item == inv_addr[ind])
+			return 1;
+		
+		ind ++;
+	}
+	return -1;
+}
+
+
+
+int do_reConnect(int * in_socket, struct sockaddr_in* in_serv_addr){
+	int retry = 40;
+	int sockfd;
+
+		// create socket
+		sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  	if (sockfd < 0) 
+      error("in do_reConnect, ERROR opening socket");
+		else
+			printf("re-open socket %d success \n", sockfd);
+		
+		
+		if(fcntl(sockfd, F_SETFL, O_NONBLOCK)<0)
+			puts("in do_reConnect, fcntl error");
+		
+	sleep(2);
+	
+	while(retry > 0){
+		printf("Retry countdown %d \n", retry);
+
+		if (connect(sockfd,(struct sockaddr *) in_serv_addr, sizeof(struct sockaddr)) < 0){
+			printf("reconnect failed, %d times to retry before abort !!\n", retry);
+			
+			/*
+			if(fcntl(sockfd, F_SETFL, O_NONBLOCK)<0)
+				puts("in do_reConnect, to O_NONBLOCK,  fcntl error");
+			*/
+		}
+		else{
+			puts("Reconnected !!");
+			//fcntl(sockfd, F_SETFL, O_NONBLOCK);
+			*in_socket = sockfd;
+			return 1;
+		}
+		retry --;	
+		sleep(2);
+	}
+	
+	close(sockfd);
+	return -1; 
+}
+
+
+void *thread_handle_gpio(void *argu){
+	
+	(void)argu;
+	//char tmpValue[2];
+	//bool_t success_capture = FALSE;
+	char uniqueName[128];
+	puts("gpio thread live ");
+	gGpioValue_t prev_gpio_value = 0;
+	
+	acquire_unique_name(XML_FILE_LOCATION, uniqueName);
+
+	//strcpy(uniqueName, acquire_unique_name(XML_FILE_LOCATION));
+	
+	while(1){
+		
+		prev_gpio_value = get_Gpiovalue;
+
+		// probe the Input
+		senpu_GPIOGet(&get_Gpiovalue);
+
+		if(sys_status & STATUS_ALARM_IND_ENABLE){
+			if(get_Gpiovalue == 1){	// alarm GPIO was triggered
+				if(xml_func_ind){
+					//getGPIO(tmpValue, 3);
+					// notify the ACS with 3
+					xml_func_ind(3);
+				}else{  // no alarm_func was registered !!
+					puts("No callback func was set !! GIO was triggered !!");
+				}
+			}
+		}
+
+		if(get_Gpiovalue == 1){
+			puts("GPIO thread capture I/O triggered !!");
+			alarm_state_change(&alarm_state, ALARM_EVENT_TRIGGER);
+		}else if((get_Gpiovalue == 0)&&(prev_gpio_value == 1))
+			alarm_state_change(&alarm_state, ALARM_EVENT_UNTRIGGERED);
+
+
+		if(status_alarm_snapshot_enable){
+			if(get_Gpiovalue == 1){
+				puts("SnapShot starts to take 5 pictures");
+				//printf("Sting is :%s\n", acquire_unique_name(XML_FILE_LOCATION));
+				
+				if(senpu_CamCapture(uniqueName))
+					puts("capture successful");
+				//sleep(2);
+			}
+		}
+
+
+		// determine if output should be activated
+		if(alarm_enable){
+			if(get_Gpiovalue == 1){ // gpio was triggered !!
+				//senpu_GPIOSet(1);
+				puts("GPIO should be triggered !!!!!!");
+				system("aplay ./download/alarm.wav &");
+				sleep(3);
+				//senpu_GPIOSet(0);
+			}
+			//else					 // gpio was NOT triggered !!
+				//senpu_GPIOSet(0);
+		}
+		puts("gpio thread probe !");
+		sleep(2);
+	}
+}
+
+
+int sem_clean(sem_t * sem2clean){
+
+	while(1){
+		if(sem_trywait(sem2clean)==0)
+			asm("NOP");//puts("decreased 1 !!");
+		else
+			break;
+	}
+	return 1;
+}
+
+
+void *thread_handle_alarm(void *argu){
+	
+	(void)argu;
+
+	puts("Start handle alarm thread !!");
+	
+	while(1){
+		switch(alarm_state){
+			case ALARM_STATE_INIT:
+				puts("alarm_state = ALARM_STATE_INIT");
+				alarm_state_change(&alarm_state, ALARM_EVENT_ADV);
+				status_alarm_snapshot_enable = FALSE;
+				//sem_init(&sem_alarm_start, 0, 0);
+				break;
+			case ALARM_STATE_RDY:
+				puts("alarm_state = ALARM_STATE_RDY");
+
+				sem_post(&sem_alarm_stop);
+				sleep(2);
+				sem_clean(&sem_alarm_stop);
+				sem_clean(&sem_alarm_start);
+				status_alarm_snapshot_enable = FALSE;
+				//printf("now sem = %d\n", sem_alarm_start);
+				break;
+			case ALARM_STATE_TRIGGERED:
+				puts("alarm_state = ALARM_STATE_TRIGGERED");
+				// start timer A
+				//sem_init(&sem_alarm_start, 0, 0);
+				sem_clean(&sem_alarm_start);
+				countdown_secs = COUNTDOWN_TRIGGER2EXPIRE;
+				sem_post(&sem_alarm_start);
+				//printf("now sem = %d\n", sem_alarm_start);
+				// enable pic capture
+				status_alarm_snapshot_enable = TRUE;
+
+				break;
+			case ALARM_STATE_EXPIRED:
+				puts("alarm_state = ALARM_STATE_EXPIRED");
+				// start timer B
+				//sem_init(&sem_alarm_start, 0, 0);
+				sem_clean(&sem_alarm_start);
+				countdown_secs = COUNTDOWN_EXPIRE2READY;
+				sem_post(&sem_alarm_start);
+				//printf("now sem = %d\n", sem_alarm_start);
+				// disable pic capture
+				status_alarm_snapshot_enable = FALSE;
+				break;
+			case ALARM_STATE_WEB_STOP_PRE:
+				puts("alarm_state = ALARM_STATE_WEB_STOP_PRE");
+				sem_post(&sem_alarm_stop);
+
+				//waiting for timer to stop at the begining
+				sleep(2);
+
+				alarm_state_change(&alarm_state, ALARM_EVENT_ADV);
+				break;
+			case ALARM_STATE_WEB_STOP:
+				puts("alarm_state = ALARM_STATE_WEB_STOP");
+				// start timer C
+				sem_clean(&sem_alarm_start);
+				countdown_secs = COUNTDOWN_WEBSTOP2RESUME;
+				sem_post(&sem_alarm_start);				
+				//printf("now sem = %d\n", sem_alarm_start);
+				status_alarm_snapshot_enable = FALSE;
+				break;
+		}
+		sleep(1);
+	}
+}
+
+void *thread_handle_timer(void *argu){
+	(void)argu;
+	struct timespec waitingTime;
+
+	int sem_rtn;
+
+	sem_init(&sem_alarm_stop, 0, 0);
+
+	while(1){
+		// wait for a period of time enough for state to be stable
+		sleep(3);
+
+		sem_wait(&sem_alarm_start);
+		printf("Start %d seconds countdown !!\n", countdown_secs);
+		clock_gettime(CLOCK_REALTIME, &waitingTime);
+		waitingTime.tv_sec += countdown_secs;
+		waitingTime.tv_nsec = 0;
+		sem_rtn = sem_timedwait(&sem_alarm_stop, &waitingTime);
+		
+		if(sem_rtn == 0)
+			printf("#%d timer about !!\n", countdown_secs);
+		else
+			printf("#%d timer reaches the end !!", countdown_secs);
+
+		//debug
+		printf("sem_timedwait rtn = %d\n", sem_rtn);
+
+		// call change state
+		alarm_state_change(&alarm_state, ALARM_EVENT_TIMEOUT);
+
+		sleep(1);
+	}
+}
+
+void test_callback(gGpioValue_t in_GPIO){
+	puts("In callback !!");
+	
+	printf("callback get GPIO value is 0x%x\n", in_GPIO);
+	
+}
+
+void test_audcallback(void){
+	puts("In audio callback !!");
+	
+	printf("an *.wav record file should be transferred by TR069 at alarm_2_16K.wav \n");
+	
+}
+
+int set_sys_time(char * new_dateTime){
+	char dateTime[13], out_dateTime[23];  // 12 chars + 10 chars + 1
+
+	//format should be [MMDDhhmmYYYY], total 12 characters
+	// check format
+	
+	memcpy(dateTime, new_dateTime, 12);
+	dateTime[12] = '\0';
+	
+	sprintf(out_dateTime, "date -s \"%s\"\n", dateTime);
+	out_dateTime[22] = '\0';
+	
+	system(out_dateTime);
+	
+	return 1;
+}
+
+/****************************************************
+**				Here Goes the APIs for TR069					*****
+****************************************************/
+
+// 11. SysInit
+
+// original ShanePu
+#if 0 
+int setSysInit(void * inputCallBackP, void * updateCallBackP){
+	char tmp[256];
+	
+	if(inputCallBackP == NULL)
+		return -1;
+
+	reg_XmlIndCallBack((ind_func_t)inputCallBackP);
+	
+	reg_XmlUpdateCallBack((ind_func_t)updateCallBackP);
+
+	//reg_XmlUploadCallBack((upload_func_t)uploadCallBackP);
+
+	getSysIp(sys_ip_addr, 16);
+	
+	sleep(1);
+	
+	
+	//start tcp streamer
+	//getStreamVideo(tmp, 255);
+	setStreamVideo("1");
+	printf("Start streamer %s \n", tmp);
+	
+	sleep(1);
+	
+	
+	//start rtsp audio
+	//getAudio(tmp, 255);
+	setAudio("3");
+	printf("Start audio %s \n", tmp);
+	
+	sleep(1);
+	// init GPIO
+	
+	
+	//system("sudo -s; ");
+	//puts("Init GPIO as follow: GPIO11 as intpu, GPIO9 as output");
+	
+	// try to call init
+	senpu_api_init();	
+	
+	return 1;
+}
+#endif
+
+int gateway_api_init(void){
+//	unsigned char value;
+
+	puts("gateway_api_init");
+	//bzero(&inv_info_delta, sizeof(inv_info_t));
+	
+	pthread_spin_init(&scan_total_inv_lock, 0);
+
+	if(scan_inv_types & USE_MOTECH)
+		bzero(inverter_msg2host_motech_array, (sizeof(inverter_msg2host_new_t))*256*USE_NUM_OF_CHANNEL);
+	
+	if(scan_inv_types & USE_EVERSOLAR)
+		bzero(inverter_msg2host_eversolar_array, (sizeof(inverter_msg2host_eversolar_t))*256*USE_NUM_OF_CHANNEL);
+	
+	if(scan_inv_types & USE_TOUGH)
+		bzero(inverter_msg2host_ali_array, (sizeof(inverter_ali_raw_t))*256*USE_NUM_OF_CHANNEL);
+
+	if(scan_inv_types & USE_DELTA)
+		bzero(inverter_msg2host_delta_array, (sizeof(inverter_msg2host_delta_t))*256*USE_NUM_OF_CHANNEL);
+
+	if(scan_inv_types & USE_ENERSOLIS)
+		bzero(inverter_msg2host_enersolis_array, (sizeof(inverter_enersolis_raw_t))*256*USE_NUM_OF_CHANNEL);
+
+	if(scan_inv_types & USE_PYRANOMETER)
+		bzero(inverter_msg2host_pyranometer_array, (sizeof(inverter_msg2host_pyranometer_t))*256*USE_NUM_OF_CHANNEL);
+
+	if(scan_inv_types & USE_THERMOGRAPH)
+		bzero(inverter_msg2host_thermograph_array, (sizeof(inverter_msg2host_thermometer_t))*256*USE_NUM_OF_CHANNEL);
+
+	if(scan_inv_types & USE_THERMOMETER)
+		bzero(inverter_msg2host_thermometer_array, (sizeof(inverter_msg2host_thermometer_t))*256*USE_NUM_OF_CHANNEL);
+	/*
+	if(pthread_create(&thread_update_inv, NULL, thread_handle_update_inv, NULL)<0){
+		printf("create thread_update_inv thread failed !!\n");
+		return -1;
+	}
+	*/
+
+/*	
+	bzero(&thread_struct_ch1_body, sizeof(scan_channel_info_t));
+
+	thread_struct_ch1_body.sem_invScan = &sem_invScan1;
+	thread_struct_ch1_body.sem_waitInvScanFin = &sem_waitInvScanFin1;
+	thread_struct_ch1_body.scan_inv_info_p = &sys_inv_info_all;
+	strcpy(thread_struct_ch1_body.dev_name, MODEMDEVICE_RF);
+
+	thread_struct_ch1 = &thread_struct_ch1_body;
+*/
+
+	//printf("Name=%s, cap=0x%x,invScan=0x%x, %x, %x\n", thread_struct_ch1->dev_name, thread_struct_ch1->scan_capability, thread_struct_ch1->sem_invScan, thread_struct_ch1->sem_waitInvScanFin, thread_struct_ch1->scan_inv_info_p);
+	
+	if(pthread_create(&summary_scan_info_sem, NULL, thread_summary_scan_info, NULL)<0){
+		printf("create thread_summary_scan_info thread failed !!\n");
+		return -1;
+	}
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_1)
+	tmp_channel_info_p1 = calloc(1, sizeof(scan_channel_info_t));
+	strcpy(tmp_channel_info_p1->dev_name, MODEMDEVICE_RF);
+	tmp_channel_info_p1->scan_capability = SCAN_INVERTER_TYPE;
+	tmp_channel_info_p1->sem_invScan_p = &sem_invScan1;
+	tmp_channel_info_p1->sem_waitInvScanFin_p = &sem_waitInvScanFin1;
+	tmp_channel_info_p1->scan_inv_info_p = &sys_inv_info_all1;
+	tmp_channel_info_p1->offset = 0;
+	bzero(&(tmp_channel_info_p1->aging_list), sizeof(aging_list_t));
+	sem_init(tmp_channel_info_p1->sem_invScan_p, 0, 0);
+	sem_init(tmp_channel_info_p1->sem_waitInvScanFin_p, 0, 0);
+	tmp_channel_info_p1->list_head = NULL;
+
+	//printf("tmp_channel_info_p=%p, sem_invScan=%p\n", tmp_channel_info_p, &tmp_channel_info_p->sem_invScan);
+	//printf("body_value=%x, body_addr=%p, addr=%p\n", tmp_channel_info_p->sem_invScan, &(tmp_channel_info_p->sem_invScan), &tmp_channel_info_p->sem_invScan);
+
+	//printf("%s, %x,%p,%p,%p,%p,%p,%p,%p\n", tmp_channel_info_p->dev_name, tmp_channel_info_p->scan_capability, tmp_channel_info_p->sem_invScan_p, tmp_channel_info_p->sem_waitInvScanFin_p, &tmp_channel_info_p->sem_invScan, &tmp_channel_info_p->sem_waitInvScanFin, tmp_channel_info_p->scan_inv_info, tmp_channel_info_p->thread_update_scan, tmp_channel_info_p->thread_inverter_manager);
+
+	if(pthread_create(&(tmp_channel_info_p1->thread_update_scan), NULL, thread_handle_update_scan, tmp_channel_info_p1)<0){
+		printf("create thread_update_scan thread failed !!\n");
+		return -1;
+	}
+
+	if(pthread_create(&tmp_channel_info_p1->thread_inverter_manager, NULL, thread_handle_manager_inverter, tmp_channel_info_p1)<0){
+		printf("create thread_inverter_manager thread failed !!\n");
+		return -1;
+	}
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_2)
+	tmp_channel_info_p2 = calloc(1, sizeof(scan_channel_info_t));
+	strcpy(tmp_channel_info_p2->dev_name, MODEMDEVICE_RJ45);
+	tmp_channel_info_p2->scan_capability = SCAN_INVERTER_TYPE;
+	tmp_channel_info_p2->sem_invScan_p = &sem_invScan2;
+	tmp_channel_info_p2->sem_waitInvScanFin_p = &sem_waitInvScanFin2;
+	tmp_channel_info_p2->scan_inv_info_p = &sys_inv_info_all2;
+	tmp_channel_info_p2->offset = 256;
+	bzero(&(tmp_channel_info_p2->aging_list), sizeof(aging_list_t));
+	sem_init(tmp_channel_info_p2->sem_invScan_p, 0, 0);
+	sem_init(tmp_channel_info_p2->sem_waitInvScanFin_p, 0, 0);
+	tmp_channel_info_p2->list_head = NULL;
+
+	if(pthread_create(&(tmp_channel_info_p2->thread_update_scan), NULL, thread_handle_update_scan, tmp_channel_info_p2)<0){
+		printf("create thread_update_scan thread failed !!\n");
+		return -1;
+	}
+
+	if(pthread_create(&tmp_channel_info_p2->thread_inverter_manager, NULL, thread_handle_manager_inverter, tmp_channel_info_p2)<0){
+		printf("create thread_inverter_manager thread failed !!\n");
+		return -1;
+	}
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_4)	
+	tmp_channel_info_p3 = calloc(1, sizeof(scan_channel_info_t));
+	strcpy(tmp_channel_info_p3->dev_name, MODEMDEVICE_USB0);
+	tmp_channel_info_p3->scan_capability = SCAN_INVERTER_TYPE;
+	tmp_channel_info_p3->sem_invScan_p = &sem_invScan3;
+	tmp_channel_info_p3->sem_waitInvScanFin_p = &sem_waitInvScanFin3;
+	tmp_channel_info_p3->scan_inv_info_p = &sys_inv_info_all3;
+	tmp_channel_info_p3->offset = 512;
+	bzero(&(tmp_channel_info_p3->aging_list), sizeof(aging_list_t));
+	sem_init(tmp_channel_info_p3->sem_invScan_p, 0, 0);
+	sem_init(tmp_channel_info_p3->sem_waitInvScanFin_p, 0, 0);
+	tmp_channel_info_p3->list_head = NULL;
+
+	if(pthread_create(&(tmp_channel_info_p3->thread_update_scan), NULL, thread_handle_update_scan, tmp_channel_info_p3)<0){
+		printf("create thread_update_scan thread failed !!\n");
+		return -1;
+	}
+
+	if(pthread_create(&tmp_channel_info_p3->thread_inverter_manager, NULL, thread_handle_manager_inverter, tmp_channel_info_p3)<0){
+		printf("create thread_inverter_manager thread failed !!\n");
+		return -1;
+	}
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_5)
+	tmp_channel_info_p4 = calloc(1, sizeof(scan_channel_info_t));
+	strcpy(tmp_channel_info_p4->dev_name, MODEMDEVICE_USB1);
+	tmp_channel_info_p4->scan_capability = SCAN_INVERTER_TYPE;
+	tmp_channel_info_p4->sem_invScan_p = &sem_invScan4;
+	tmp_channel_info_p4->sem_waitInvScanFin_p = &sem_waitInvScanFin4;
+	tmp_channel_info_p4->scan_inv_info_p = &sys_inv_info_all4;
+	tmp_channel_info_p4->offset = 768;
+	bzero(&(tmp_channel_info_p4->aging_list), sizeof(aging_list_t));
+	sem_init(tmp_channel_info_p4->sem_invScan_p, 0, 0);
+	sem_init(tmp_channel_info_p4->sem_waitInvScanFin_p, 0, 0);
+	tmp_channel_info_p4->list_head = NULL;
+
+	if(pthread_create(&(tmp_channel_info_p4->thread_update_scan), NULL, thread_handle_update_scan, tmp_channel_info_p4)<0){
+		printf("create thread_update_scan thread failed !!\n");
+		return -1;
+	}
+
+	if(pthread_create(&tmp_channel_info_p4->thread_inverter_manager, NULL, thread_handle_manager_inverter, tmp_channel_info_p4)<0){
+		printf("create thread_inverter_manager thread failed !!\n");
+		return -1;
+	}
+#endif
+
+/*
+	if(pthread_create(&thread_update_scan1, NULL, thread_handle_update_scan_ch1, NULL)<0){
+		printf("create thread_update_scan1 thread failed !!\n");
+		return -1;
+	}
+	if(pthread_create(&thread_inverter_manager1, NULL, thread_handle_manager_inverter_ch1, NULL)<0){
+		printf("create thread_inverter_manager thread failed !!\n");
+		return -1;
+	}
+
+
+	if(pthread_create(&thread_update_scan2, NULL, thread_handle_update_scan_ch2, NULL)<0){
+		printf("create thread_update_scan2 thread failed !!\n");
+		return -1;
+	}	
+	if(pthread_create(&thread_inverter_manager2, NULL, thread_handle_manager_inverter_ch2, NULL)<0){
+		printf("create thread_inverter_manager thread failed !!\n");
+		return -1;
+	}	
+*/
+	return 1;
+}
+
+int reboot_cnt_get_and_set(bool_t ifSet, bool_t reset, char* rtn_string){
+	char filename[32] = "restart_cnt.log";
+
+	FILE* file_p;
+	char out_buff[4096];
+	int rtn_value;
+	char tmp_time_now[15];
+
+	//tmp_charP = tmp_time;
+	//sprintf(filename, "%s", WR_CACHE_DIR, tmp_time_now);
+
+	syscall_getRsp("date +%Y%m%d%H%M%S", tmp_time_now);
+	tmp_time_now[14] = '\0';
+
+	// output to a file
+	file_p = fopen(filename, "r+");
+	if (file_p==NULL){
+		printf("Open fine=%s error !!\n", filename);
+		return -1;
+	}
+
+	bzero(out_buff, sizeof(out_buff));
+	//fread(out_buff, 1, 1, file_p); // dummy read "["
+	fread(out_buff, 1, 3, file_p);
+	rtn_value = atoi(out_buff);
+
+	if(reset || (rtn_value>99)){
+		rtn_value = 0;
+		ifSet = TRUE;
+	}
+
+	fseek(file_p, 0, SEEK_SET);
+	fread(out_buff, 1, 20, file_p);
+	out_buff[20]='\0';
+	strcpy(rtn_string, out_buff);
+
+	if(ifSet){
+		// inc the value
+		sprintf(out_buff, "%03d_%s\n", rtn_value + 1, tmp_time_now);
+		//printf("gonna write %s\n", out_buff);
+		fseek(file_p, 0, SEEK_SET);
+		fwrite(out_buff, 1, strlen(out_buff), file_p);
+		//fputs("44", file_p);
+	}
+	
+	fclose(file_p);
+	return 1;
+}
+
+int daai_setSysInit(void * updateCallBackP){
+
+	if((updateCallBackP == NULL))
+		return -1;
+
+	reg_XmlUpdateCallBack((ind_func_t)updateCallBackP);
+
+	// make TR send our info right immediately
+	if(xml_func_update)
+		xml_func_update(1);
+	
+	gateway_api_init();
+
+	reboot_cnt_get_and_set(TRUE, FALSE, restart_cnt);
+
+	printf("%s\n", restart_cnt);
+
+#ifdef USE_3G
+	system("./ppp-stop");
+
+	sleep(5);
+
+	get_sim5215_info(DEV_3G, info_3G, sizeof(info_3G));
+
+	system("pppd call wcdma &");
+	
+	sleep(7);
+
+	system("route del default; route add default gw 10.64.64.64 ppp0");
+#endif
+
+	return 1;
+}
+
+
+// 12. SysDispose
+
+int daai_setSysDispose(void){
+	//char ps_id[16], kill_cmd[16];
+	//char buff_syscall[128];
+
+	//ApproDrvExit();
+	
+	// kill IPNC process
+	//system("cd /opt/ipnc/; ./killall.sh");
+	/*
+	puts("kill the video server");
+	syscall_getRsp("ps aux | grep palantir | grep -v grep | awk '{print $2}'", buff_syscall);
+	strcpy(ps_id, buff_syscall);
+	sprintf(kill_cmd, "kill %s", ps_id);
+	system(kill_cmd);
+	
+	puts("kill the rtsp audio server");
+	syscall_getRsp("ps aux | grep rtsp | grep -v grep | awk '{print $2}'", buff_syscall);
+	strcpy(ps_id, buff_syscall);
+	sprintf(kill_cmd, "kill %s", ps_id);
+	system(kill_cmd);	
+	*/
+/*
+	pthread_kill(thread_update_scan1, SIGALRM);
+	pthread_kill(thread_inverter_manager1, SIGALRM);
+	pthread_kill(thread_update_scan2, SIGALRM);
+	pthread_kill(thread_inverter_manager2, SIGALRM);	
+*/
+	/*
+	pthread_kill(thread_senpu_manager, SIGALRM);
+	pthread_kill(thread_gpio, SIGALRM);
+	pthread_kill(thread_alarm, SIGALRM);
+	pthread_kill(thread_timer, SIGALRM);
+	*/
+	
+	// block waiting the following thread to return one by one
+/*
+	pthread_join(thread_update_scan1, NULL);
+	pthread_join(thread_inverter_manager1, NULL);
+	pthread_join(thread_update_scan2, NULL);
+	pthread_join(thread_inverter_manager2, NULL);	
+*/
+	/*
+	pthread_join(thread_senpu_manager, NULL);
+	pthread_join(thread_gpio, NULL);
+	pthread_join(thread_alarm, NULL);
+	pthread_join(thread_timer, NULL);
+	*/
+
+	pthread_spin_destroy(&scan_total_inv_lock);
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_1)
+	free(tmp_channel_info_p1);
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_2)	
+	free(tmp_channel_info_p2);
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_4)	
+	free(tmp_channel_info_p3);
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_5)
+	free(tmp_channel_info_p4);
+#endif
+
+	return 1;
+}
+
+// 1. get GPIO
+
+int getGPIO(char * returnString, int maxLen){
+	//gGpioValue_t sys_GPIO;
+	
+	if((maxLen<2)||(returnString==NULL))
+		return -1;
+	
+	//senpu_GPIOGet(&sys_GPIO);
+
+	printf("GetGPIO function was called !!");
+
+	returnString[0] = alarm_enable + '0';
+	returnString[1] = '\0';
+	
+	return 1;
+}
+
+uint16_t getInvTypeById(uint8_t in_Id, scan_inv_info_t* type_id_table){
+	int i=0;
+	bool_t found = FALSE;
+
+	if(in_Id == 0)
+		return 0;
+
+	while(type_id_table->invInfo[i].invId != 0){
+		
+		if(type_id_table->invInfo[i].invId == in_Id){
+			found = TRUE;
+			break;
+		}
+		i++;
+	}
+	
+	if(found)
+		return type_id_table->invInfo[i].invType;
+	else
+		return 0;
+}
+
+uint16_t getInvTypeByIdTotal(uint16_t in_Id, scan_total_inv_info_t* type_id_table){
+	int i=0;
+	bool_t found = FALSE;
+
+	if((in_Id == 0) || (in_Id > MAX_LIMIT_INVS))
+		return 0;
+
+	while(i < type_id_table->num){
+		
+		if(type_id_table->invInfo[i].invId == in_Id){
+			found = TRUE;
+			break;
+		}
+		i++;
+	}
+	
+	if(found)
+		return type_id_table->invInfo[i].invType;
+	else
+		return 0;
+}
+
+int getSubSetInvInfo(scan_inv_info_t* motherSet, uint16_t invType, scan_inv_info_t* subSet){
+	int tmp_i=0, subSet_cnt=0;
+
+	if(!motherSet)
+		return -1;
+	else if(motherSet->num == 0)
+		return -1;
+
+	while(tmp_i < motherSet->num){
+		if(motherSet->invInfo[tmp_i].invType == invType){
+			subSet->invInfo[subSet_cnt].invId = motherSet->invInfo[tmp_i].invId;
+			subSet_cnt ++;
+		}
+		tmp_i ++;
+	}
+
+	subSet->num = subSet_cnt;
+
+	return 1;
+}
+
+// 2. get Energy
+
+int daai_getEnergy(int index, char * returnString, int maxLen){
+	
+	char tmp_buff[512], check_ascii_id[5]="0000";
+	uint16_t curr_type;
+
+	if (index==0 || index > 256*USE_NUM_OF_CHANNEL)
+		return -1;
+	
+	if (returnString == NULL)
+		return -1;
+		
+	//senpu_EnergyGet_new(index, &inverter_msg2host_motech_array[index]);
+
+	//puts("try get lock");
+	pthread_spin_lock(&scan_total_inv_lock);
+	curr_type = getInvTypeByIdTotal((uint16_t)index, &sys_inv_info_all);
+
+	if(curr_type == USE_PYRANOMETER)
+		convert_invmsg_to_asci_pyranometer(tmp_buff, &inverter_msg2host_pyranometer_array[index]);
+	else if(curr_type == USE_THERMOGRAPH)
+		convert_invmsg_to_asci_thermograph(tmp_buff, &inverter_msg2host_thermograph_array[index]);
+	else if(curr_type == USE_THERMOMETER)
+		convert_invmsg_to_asci_thermometer(tmp_buff, &inverter_msg2host_thermometer_array[index]);
+	else if(curr_type == USE_MOTECH)
+		convert_invmsg_to_asci_motech(tmp_buff, &inverter_msg2host_motech_array[index]);
+	else if(curr_type == USE_TOUGH)
+		convert_invmsg_to_asci_ali(tmp_buff, &inverter_msg2host_ali_array[index]);
+	else if(curr_type == USE_EVERSOLAR)
+		convert_invmsg_to_asci_eversolar(tmp_buff, &inverter_msg2host_eversolar_array[index], sizeof(tmp_buff));
+	else if (curr_type == USE_DELTA)
+		convert_invmsg_to_asci_delta(tmp_buff, &inverter_msg2host_delta_array[index]);
+	else if (curr_type == USE_ENERSOLIS)
+		convert_invmsg_to_asci_enersolis(tmp_buff, &inverter_msg2host_enersolis_array[index]);
+	else{
+		printf("No info matches this ID=%d !!\n", index);
+		puts("release lock");
+		pthread_spin_unlock(&scan_total_inv_lock);
+		return -1;
+	} 
+
+	if (maxLen<(int)strlen(tmp_buff)){
+		puts("release lock");
+		pthread_spin_unlock(&scan_total_inv_lock);
+		return -1;
+	}
+
+	strcpy(returnString, tmp_buff);
+
+	// check if this capturing is marked as illegal by checking the leading ID==0
+	memcpy(check_ascii_id, tmp_buff, 4);
+	check_ascii_id[4] = '\0';
+	if(strcmp(check_ascii_id, "0000")==0){
+		printf("getEnergy called, ID=%d failed due to ID=0000 detected !! \n", index);
+		//puts("release lock");
+		pthread_spin_unlock(&scan_total_inv_lock);
+		return -1;
+	}
+	else{
+		//puts("release lock");
+		printf("getEnergy called, ID=%d successed !! \n", index);
+		pthread_spin_unlock(&scan_total_inv_lock);
+		return strlen(tmp_buff);
+	}
+}
+#if 0
+int getEnergy_instant(int index, char * returnString, int maxLen){
+	
+	char tmp_buff[256];
+	uint8_t curr_type;
+
+	if (index==0 || index > 256*USE_NUM_OF_CHANNEL)
+		return -1;
+	
+	if (returnString == NULL)
+		return -1;
+		
+	//senpu_EnergyGet_new(index, &inverter_msg2host_motech_array[index]);
+
+	curr_type = getInvTypeByIdTotal((uint16_t)index, &sys_inv_info_all);
+	
+	if(curr_type == USE_MOTECH)
+		convert_invmsg_to_asci_motech(tmp_buff, &inverter_msg2host_motech_array[index]);
+	else if(curr_type == USE_TOUGH)
+		convert_invmsg_to_asci_ali(tmp_buff, &inverter_msg2host_ali_array[index]);
+
+	if (maxLen<(int)strlen(tmp_buff))
+		return -1;
+
+	strcpy(returnString, tmp_buff);
+
+	return strlen(tmp_buff);
+}
+#endif
+// 3. get SysIP
+
+int getSysIp(char* returnString, int maxLen){
+	//int n;
+	char buff_syscall[128];
+	
+	if (returnString == NULL)
+		return -1;	
+	
+	/*
+	// update internal IP address
+	print_addresses(AF_INET);
+	
+	n = sprintf(sys_IP, "%d.%d.%d.%d", msg2cloudServer.addr_IP[0], msg2cloudServer.addr_IP[1], msg2cloudServer.addr_IP[2], msg2cloudServer.addr_IP[3]);
+	sys_IP[n] = '\0';
+	*/
+	syscall_getRsp(EXT_IP_CURL_ADDR, buff_syscall);
+	strcpy(sys_IP, buff_syscall);
+			
+	if( (int)strlen(sys_IP)>maxLen)
+		return -1;
+	
+	//the last charater of the return of syscall_getRsp(...) is a '\n', try to put a null instead of it
+	sys_IP[strlen(sys_IP)] = '\0';
+	strcpy(returnString, sys_IP);
+	
+	return strlen(sys_IP);
+}
+
+// 4. get SysMac
+int getSysMac(char* returnString, int maxLen){
+	char buff_syscall[128];
+	
+	if ((maxLen<18)||(returnString == NULL))
+		return -1;
+		
+	syscall_getRsp("cat /sys/class/net/eth0/address", buff_syscall);
+	strcpy(sys_MacAddr, buff_syscall);
+	
+	if( (int)strlen(sys_MacAddr)>maxLen)
+		return -1;
+		 
+	strcpy(returnString, sys_MacAddr);
+	
+	return strlen(sys_MacAddr);
+}
+
+// 5. get SysInv
+
+int daai_getSysInv(char* returnString, int maxLen){
+	int n, i;
+	char buffer[50000];
+	char *buffp;
+
+	if (returnString == NULL)
+		return -1;
+
+	buffp = buffer;
+
+	n = sprintf(buffp, "%.4d", sys_inv_info_all.num);
+	buffp +=n;
+			
+	for(i=0;i<sys_inv_info_all.num;i++){
+		n = sprintf(buffp, ",%.4d", sys_inv_info_all.invInfo[i].invId);
+		buffp += n;
+	}	
+
+	buffp[0] = '\0';
+	
+	if( (int)strlen(buffer) > maxLen)
+		return -1;
+			
+	strcpy(returnString, buffer);
+	printf("getSysInv called, RTN:%s\n", returnString);
+	return strlen(buffer);
+}
+
+int getSysInv_instant(char* returnString, int maxLen){
+	int n, i;
+	char buffer[50000];
+	char *buffp;
+
+	if (returnString == NULL)
+		return -1;
+
+	buffp = buffer;
+
+	//inverter_scan((scan_inv_info_t*)&sys_inv_info);
+	n = sprintf(buffp, "%.4d", sys_inv_info_all.num);
+	buffp +=n;
+			
+	for(i=0;i<sys_inv_info_all.num;i++){
+		n = sprintf(buffp, ",%.4d", sys_inv_info_all.invInfo[i].invId);
+		buffp += n;
+	}
+
+	buffp[0] = '\0';
+	
+	if( (int)strlen(buffer) > maxLen)
+		return -1;
+			
+	strcpy(returnString, buffer);
+	return strlen(buffer);
+}
+
+// 6. get SysTimeStampEnable
+int getSysTimeStampEnable(char * returnString, int maxLen){
+	
+	// check len
+	if ((maxLen < 1)||(returnString == NULL))
+		return -1;
+		
+	if(sys_TimeStampEnable)
+		strcpy(returnString, "1");
+	else
+		strcpy(returnString, "0");
+		
+	return 1;
+}
+
+// 7. get Audio
+
+int getAudio(char * returnString, int maxLen){
+
+	char ps_id[16], kill_cmd[16];
+	char ip_address[16];
+	char buffer[128];
+	char buff_syscall[128];
+	// check len
+	if ((maxLen < 2)||(returnString == NULL))
+		return -1;
+
+	// stop audio first
+	puts("kill the rtsp audio server");
+	syscall_getRsp("ps aux | grep rtsp | grep -v grep | awk '{print $2}'", buff_syscall);
+	strcpy(ps_id, buff_syscall);
+	sprintf(kill_cmd, "kill %s", ps_id);
+	system(kill_cmd);	
+	
+	// start audio
+	system("/home/pi/gst-rtsp/rtsp &");
+	
+	getSysIp(ip_address, 16);
+
+	sprintf(buffer, "rtsp://%s:8554/audio_only", ip_address);
+	
+	strcpy(returnString, buffer);
+	return strlen(returnString);	
+}
+
+// 8. get StreamVideo
+int getStreamVideo(char * returnString, int maxLen){
+
+	char ps_id[16], kill_cmd[16];
+	char ip_address[16];
+	char buffer[128];
+	char buff_syscall[128];
+	
+	// check len
+	if ((maxLen < 2)||(returnString == NULL))
+		return -1;
+	
+	// first kill tcp streamer
+	puts("kill the tcp streaming server");
+	syscall_getRsp("ps aux | grep palantir | grep -v grep | awk '{print $2}'", buff_syscall);
+	strcpy(ps_id, buff_syscall);
+	sprintf(kill_cmd, "kill %s", ps_id);
+	system(kill_cmd);
+	
+	// start streamer
+	system("/home/pi/palantir/palantir &");
+	
+	getSysIp(ip_address, 16);
+
+	sprintf(buffer, "http://%s:3000", ip_address);
+	
+	strcpy(returnString, buffer);
+	
+	return strlen(returnString);	
+	
+}
+
+// 9. get Time
+int getSysTime(char * returnString, int maxLen){
+	
+	// check len
+	if ((maxLen < 2)||(returnString == NULL))
+		return -1;	
+	
+	strcpy(returnString, sys_time);
+	
+	return strlen(sys_time);
+}
+
+// 10. get SysStatus
+
+int getSysStatus(char * returnString, int maxLen){
+	
+	char n=0;
+	//char high_4bit, low_4bit;
+	char tmp_status;
+	// check len
+	if ((maxLen < 2)||(returnString == NULL))
+		return -1;
+
+	char value_alarm, value_auto, value_force, value_reboot, value_period, value_status;
+	
+	tmp_status = sys_status;
+	tmp_status &= STATUS_ALARM_IND_ENABLE;
+	tmp_status = tmp_status >> ALARM_BIT;
+	value_alarm = tmp_status;
+	
+	tmp_status = sys_status;
+	tmp_status &= STATUS_INV_AUTO_SCAN_ENABLE;
+	tmp_status = tmp_status >> INV_AUTO_BIT;
+	value_auto = tmp_status;
+	
+	tmp_status = sys_status;
+	tmp_status &= STATUS_INV_FORCE_SCAN;
+	tmp_status = tmp_status >> INV_FORCE_BIT;
+	value_force = tmp_status;
+	
+	tmp_status = sys_status;
+	tmp_status &= STATUS_SYSTEM_REBOOT_BIT;
+	tmp_status = tmp_status >> SYSTEM_REBOOT_BIT;
+	value_reboot = tmp_status;
+
+	tmp_status = sys_status;
+	tmp_status &= STATUS_UPDATE_PERIOD_2BIT;
+	tmp_status = tmp_status >> UPDATE_PERIOD_LBIT;
+	value_period = tmp_status;
+	
+	tmp_status = sys_status;
+	tmp_status &= STATUS_SYSTEM_2BIT;
+	tmp_status = tmp_status >> SYSTEM_STATUS_LBIT;
+	value_status = tmp_status;
+	
+	n = sprintf(returnString, "%d,%d,%d,%d,%d,%d", value_alarm, value_auto, value_force, value_reboot, value_period, value_status);
+
+	return n;		
+}
+
+// 13. SetGPIO
+
+int setGPIO(char * inputString){
+	//char tmp[3];
+	//gGpioValue_t gpio_value;
+
+	if((strlen(inputString) > 5)||(inputString == NULL))
+		return -1;
+	
+	//test
+	puts("-------------");
+	printf("setGPIO was called, input=%s\n", inputString);
+	puts("-------------");
+	
+	//gpio_value = (gGpioValue_t)atoi(inputString);
+
+	// when UI gpio button was pushed, it send 0x00, when release, it send 0x01
+	if((inputString[3] - '0')==1)
+	  alarm_enable = 0;
+	else if((inputString[3] - '0')==0)
+	  alarm_enable = 1;
+
+	//alarm_enable = inputString[0] - '0';
+	//senpu_GPIOSet(gpio_value);
+
+	return 1;
+}
+
+// 14. set systimestampenable
+
+// 15. set SnapShot
+int setSnapShot(char * inputString){
+	
+	if((strlen(inputString) > 1)||(inputString == NULL))
+		return -1;
+	
+	if (xml_func_ind==NULL)
+		return -2;
+	
+	senpu_SnapShotSet(0, 0);
+	
+	// call the callback function at XML to indicate ACS the completion of the action
+	xml_func_ind(9);
+	
+	return 1;
+}
+
+//16. set Audio
+
+int setAudio(char * inputString){
+	
+	uint8_t in_value;
+	char kill_cmd[32];
+	char ps_id[8];
+	char buff_syscall[128];
+	
+	if((strlen(inputString) > 1)||(inputString == NULL))
+		return -1;
+
+	in_value = (uint8_t)atoi(inputString);
+
+	printf("setAudio was called, in_value=%d\n", in_value);
+
+	switch(in_value){
+	case 3:
+		// stop audio first
+		puts("kill the rtsp audio server");
+		syscall_getRsp("ps aux | grep rtsp | grep -v grep | awk '{print $2}'", buff_syscall);
+		strcpy(ps_id, buff_syscall);
+		sprintf(kill_cmd, "sudo kill %s", ps_id);
+		system(kill_cmd);	
+		
+		// start audio
+		system("/home/pi/gst-rtsp/rtsp &");
+		puts("setAudio with parameter=3 was called !!");	
+		return 1;
+		
+	case 2:
+		// just play audio
+		sleep(1);
+		system("aplay ./download/recording.wav &");
+  	
+		// sleep 5 seconds for recording to play
+		sleep(5);
+  	
+		// kill pid if time expire
+		syscall_getRsp("ps aux | grep aplay | grep -v grep | awk '{print $2}'", buff_syscall);
+		strcpy(ps_id, buff_syscall);
+		sprintf(kill_cmd, "sudo kill %s", ps_id);
+		system(kill_cmd);
+		puts("setAudio with parameter=2 was called !!");	
+		return 1;
+	case 1:
+		alarm_state_change(&alarm_state, ALARM_EVENT_WEBSTOP);
+		//sem_post(&sem_alarm_stop);
+		return 1;
+	default:;
+		
+	}
+	return -1;	
+
+}
+
+// 17. set StreamVideo
+
+int setStreamVideo(char * inputString){
+	char ps_id[16], kill_cmd[16];
+	char buff_syscall[128];
+	uint8_t in_value;
+
+	if((strlen(inputString) > 1)||(inputString == NULL))
+		return -1;
+
+	in_value = (uint8_t)atoi(inputString);
+
+	switch(in_value){
+		case 0:
+			// find the associated id of the process palantir
+			puts("kill the tcp streaming server");
+			syscall_getRsp("ps aux | grep palantir | grep -v grep | awk '{print $2}'", buff_syscall);
+			strcpy(ps_id, buff_syscall);
+			sprintf(kill_cmd, "sudo kill %s", ps_id);
+			system(kill_cmd);		
+		break;
+		case 1:
+			// first kill tcp streamer
+			puts("kill the tcp streaming server");
+			syscall_getRsp("ps aux | grep palantir | grep -v grep | awk '{print $2}'", buff_syscall);
+			strcpy(ps_id, buff_syscall);
+			sprintf(kill_cmd, "sudo kill %s", ps_id);
+			system(kill_cmd);
+			
+			// start streamer
+			system("/home/pi/palantir/palantir &");
+			puts("setStreamVideo with parameter=1 was called !!");	
+			return 1;	
+			
+		break;
+		default:;
+	}
+	
+	return -1;
+
+}
+
+// 18. set SysTime
+
+int setSysTime(char * inputString){
+
+	if((strlen(inputString) > 13)||(inputString == NULL))
+		return -1;
+
+	if(senpu_SysCtrlSet(SYS_SET_TIME, inputString)){
+		memcpy(sys_time, inputString, 13);
+		sys_time[12] = '\0';
+	}	
+	
+	return 1;
+	
+}
+
+// 19. setSys Ctrl
+
+int daai_setSysCtrl(char * inputString){
+	
+	int a,b,c,d,e;
+	
+	if((strlen(inputString) > 15)||(inputString == NULL))
+		return -1;
+	
+	sscanf(inputString, "%d,%d,%d,%d,%d", &a, &b, &c, &d, &e);
+	
+	printf("We get command from ACS, they are a=%d, b=%d, c=%d, d=%d, e=%d\n", a, b, c, d, e);
+
+	if(a==1){  // force scan
+		puts("schedule force scan");
+		sys_status = sys_status | STATUS_INV_FORCE_SCAN;
+	}
+
+	if(b){  // tune interval in minutes unit
+		if(b<10){
+			printf("change capture interval to %d minutes\n", b);
+			update_acs_interval = b;
+		}
+	}
+
+        if(c==1){
+                puts("Get 3G re-connect command, do it !!");
+                system("sh /ramdisk/ppp-stop; sleep 5; pppd call wcdma &");
+        }
+
+        if(d){
+                if(d==1){
+                        puts("use RTN16 preEdited XML file");
+                        system("cp /home/ubuntu/gateway_proj/tr-c/env/Profiles/TR106_BaselineProfile_rtn16 /home/ubuntu/gateway_proj/tr-c/env/Profiles/TR106_BaselineProfile.xml");
+                        system("sudo reboot");
+                }
+                if(d==3){
+                        puts("use CSAC 8083 preEdited XML file");
+                        system("cp /home/ubuntu/gateway_proj/tr-c/env/Profiles/TR106_BaselineProfile_csac_8083 /home/ubuntu/gateway_proj/tr-c/env/Profiles/TR106_BaselineProfile.xml");
+                        system("sudo reboot");
+                }                    
+                if(d==4){
+                        puts("use CSAC 8084 preEdited XML file");
+                        system("cp /home/ubuntu/gateway_proj/tr-c/env/Profiles/TR106_BaselineProfile_csac_8084 /home/ubuntu/gateway_proj/tr-c/env/Profiles/TR106_BaselineProfile.xml");
+                        system("sudo reboot");
+                }                
+        }
+
+
+	if(e==1){
+		puts("Get reboot command, reboot the Machine");
+		system("sudo reboot");
+	}
+
+/*	
+	if(a)
+		sys_status |= STATUS_ALARM_IND_ENABLE;
+	else
+		sys_status &= ~STATUS_ALARM_IND_ENABLE;
+	
+	if(b)
+		sys_status |= STATUS_INV_AUTO_SCAN_ENABLE;
+	else
+		sys_status &= ~STATUS_INV_AUTO_SCAN_ENABLE;
+	
+	if(c)
+		sys_status |= STATUS_INV_FORCE_SCAN;
+	else
+		sys_status &= ~STATUS_INV_FORCE_SCAN;
+	
+	if(d){
+		puts("Reboot system");
+		system("sudo reboot");
+
+	}
+
+
+	in_value_period = (char)(e << UPDATE_PERIOD_LBIT);
+	sys_status &= ~STATUS_UPDATE_PERIOD_2BIT;
+	sys_status |= in_value_period;
+*/
+	//sprintf(&in_value, "%x", tmp_value); // change itself to from decimal to hex
+	//printf("Internal sys_status = %d\n", sys_status);
+	
+	
+	// make interval variable take effect for inverter update loop
+
+	/*
+	update_acs_interval = ((sys_status&STATUS_UPDATE_PERIOD_2BIT) == 0x00) ? 4 :	
+													((sys_status&STATUS_UPDATE_PERIOD_2BIT) == 0x10) ? 4 :  
+													((sys_status&STATUS_UPDATE_PERIOD_2BIT) == 0x20) ? 4 :
+														4;
+	*/
+	return 1;
+}
+
+int daai_getSensorInfo(char* returnString, int maxLen){
+ 
+    (void) maxLen;
+    char jsonBuff[4096]="";
+ 	char tmp_time[64]="", int_interface[64]="", rtn_string[256]="", ext_interface[64]="", rtn_ext_interface[64]="", externalIP[64]="0.0.0.0"; //new_time[64]="",
+ 	//char cmd_rtn[64];
+ //	char tmp_yr[5]="",tmp_mon[3]="", tmp_da[3]="",tmp_hour[3]="",tmp_minutes[3]="",tmp_seconds[3]="";
+ 	/** get time **/
+ 	syscall_getRsp("date +%Y%m%d%H%M%S", tmp_time);
+    tmp_time[14] = '\0';
+    int tmp_count=0, curr_position=0;
+    FILE *fp;
+/*
+    memcpy(tmp_yr, &tmp_time[0], 4);	// parse year
+    memcpy(tmp_mon, &tmp_time[4], 2);	// parse mon
+    memcpy(tmp_da, &tmp_time[6], 2);	// parse date
+    memcpy(tmp_hour, &tmp_time[8], 2);  // parse hour
+    memcpy(tmp_minutes, &tmp_time[10], 2);  // parse minutes
+    memcpy(tmp_seconds, &tmp_time[12], 2);  // parse minutes
+
+    sprintf(new_time, "%s\/%s\/%s_%s:%s:%s", tmp_yr,tmp_mon,tmp_da,tmp_hour,tmp_minutes,tmp_seconds);
+    printf("our value:%s\n", new_time);
+*/
+	/** get internal interface **/	
+	if(strcmp(MODEMDEVICE, "/dev/ttyO1") == 0)
+    	strcpy(int_interface, "RF433MHz");
+    else if(strcmp(MODEMDEVICE, "/dev/ttyO2") == 0)
+    	strcpy(int_interface, "RS485");
+    else if(strcmp(MODEMDEVICE, "/dev/ttyUSB0") == 0)
+    	strcpy(int_interface, "USB");
+    else
+    	strcpy(int_interface, "Unknown");
+
+    /** get external interface **/
+	syscall_getRsp("route | awk '/default/{print $8}'", rtn_ext_interface);
+
+	if(strcmp(rtn_ext_interface, "eth0\n") == 0)
+		strcpy(ext_interface, "Static");
+	else if(strcmp(rtn_ext_interface, "poe0\n") == 0)
+		strcpy(ext_interface, "ADSL");
+	else if(strcmp(rtn_ext_interface, "wlan0\n") == 0)
+		strcpy(ext_interface, "WiFi");	
+	else if(strcmp(rtn_ext_interface, "ppp0\n") == 0)
+		strcpy(ext_interface, "3G");
+
+	/** get external IP **/
+	syscall_getRsp(EXT_IP_CURL_ADDR, externalIP);
+	externalIP[strlen(externalIP)] = '\0';
+
+	if (strlen(externalIP) > 20)
+		strcpy(externalIP, "0.0.0.0");
+
+    sprintf(rtn_string, "Time=%s,InternalNet=%s,ExternalNet=%s,ExternalIP=%s,%s,ScanInterval=%d,ScanCapability=0x%04x,RebootLog=%s", tmp_time, int_interface, ext_interface, externalIP, info_3G, update_acs_interval, scan_inv_types, restart_cnt);
+
+    bzero(jsonBuff, sizeof(jsonBuff));
+
+    sprintf(jsonBuff, "{\n\
+  \"Time\": \"%s\",\n\
+  \"InternalNet\": \"%s\",\n\
+  \"ExternalNet\": \"%s\",\n\
+  \"ExternalIP\": \"%s\",\n\
+  \"3G_info\": \"%s\",\n\
+  \"ScanInterval\": %d,\n\
+  \"ScanCapability\": \"0x%04x\",\n\
+  \"RebootLog\": \"%s\"\n}\n", tmp_time, int_interface, ext_interface, externalIP, info_3G, update_acs_interval, scan_inv_types, restart_cnt);
+
+    puts("Write JSON to file json.txt !!");
+    fp = fopen("json.txt", "wb");
+
+
+    fwrite(jsonBuff, sizeof(char), sizeof(jsonBuff), fp);
+
+    fclose(fp);
+
+ 	if (strlen(rtn_string) > (unsigned int)maxLen)
+    	return -1;
+/*
+    // output JSON format
+    curr_position = 0;
+    tmp_count = 0;
+    tmp_count = sprintf(&jsonBuff[curr_position], "{\n");
+    curr_position += tmp_count;
+    //Time
+    tmp_count = sprintf(&jsonBuff[curr_position], "  \"Time\": \"%s\",\n", tmp_time);
+    curr_position += tmp_count;
+    //InternalNet
+ 	tmp_count = sprintf(&jsonBuff[curr_position], "  \"InternalNet\": \"%s\",\n", int_interface);
+    curr_position += tmp_count;
+    //ExternalNet
+    tmp_count = sprintf(&jsonBuff[curr_position], "  \"ExternalNet\": \"%s\",\n", ext_interface);
+    curr_position += tmp_count;
+    //ExternalIP
+    tmp_count = sprintf(&jsonBuff[curr_position], "  \"ExternalIP\": \"%s\",\n", ext_interface);
+    curr_position += tmp_count;
+    //3G information
+    tmp_count = sprintf(&jsonBuff[curr_position], "  \"3G_info\": \"%s\",\n", ext_interface);
+    curr_position += tmp_count;
+    //ScanInterval
+    tmp_count = sprintf(&jsonBuff[curr_position], "  \"ScanInterval\": %d,\n", update_acs_interval);
+    curr_position += tmp_count;
+    //ScanCapability
+    tmp_count = sprintf(&jsonBuff[curr_position], "  \"ScanInterval\": 0x%04x,\n", scan_inv_types);
+    curr_position += tmp_count;
+    //ReBootLog
+    tmp_count = sprintf(&jsonBuff[curr_position], "  \"ScanInterval\": %s\n", restart_cnt);
+    curr_position += tmp_count;
+    // The End
+    tmp_count = sprintf(&jsonBuff[curr_position], "}\n");
+    curr_position += tmp_count;
+*/
+    printf("Output:\n%s", jsonBuff);
+
+ 	strcpy(returnString, rtn_string);
+ 	
+ 	return 1;
+
+}
+
+int daai_getSysCtrl(char * returnString, int maxLen){
+
+	if(maxLen < 2)
+		return -1;
+
+	sprintf(returnString, "%.2d", sys_status);
+	
+	return 1;
+}
+
+void realIndXmlCallBackFunc(int event){
+	printf("callback func at XML is called, input parameter is an int:%d\n", event);
+}
+
+void realUpdateXmlCallBackFunc(int event){
+	printf("callback of update func at XML is called, input parameter is an int:%d\n", event);
+}
+
+void realUploadXmlCallBackFunc(char* str1, char* str2){
+	printf("callback of update func at XML is called, input parameter are two strings 1:%s, 2:%s \n", str1, str2);
+}
+
+
+/**********************************************
+**				End  APIs for TR069							*****
+**********************************************/
+
+#define WR_CACHE_FULL_FILE_NUMBER 100
+#define WR_BACKUP_LOCATION "/media/info_backup/"
+#define WR_CACHE_DIR "./info_cache/"
+#define WR_CACHE_QUARTER (WR_CACHE_FULL_FILE_NUMBER >> 2)
+#define WR_CACHE_HALF (WR_CACHE_FULL_FILE_NUMBER >> 1)
+#define WR_CACHE_THREE_QUARTERS (WR_CACHE_QUARTER + WR_CACHE_HALF)
+#define WR_RESTORE_ENTRIES WR_CACHE_QUARTER
+#define WR_BACKUP_FULL 200
+
+
+bool_t is_cache_full(void){
+	char file_number[12], cmd[1024];
+	int file_num_int;
+	int i;
+
+	i = sprintf(cmd, "find %s -follow  -maxdepth 1 -type f | wc -l", WR_CACHE_DIR);
+	cmd[i] = '\0';	
+
+	syscall_getRsp(cmd, file_number);
+	file_num_int = atoi(file_number);
+
+	if (file_num_int > WR_CACHE_FULL_FILE_NUMBER)
+		return TRUE;
+	else
+		return FALSE;
+}
+
+bool_t is_cache_avail(void){
+	char file_number[12], cmd[1024];
+	int file_num_int;
+	int i;
+
+	i = sprintf(cmd, "find %s -follow  -maxdepth 1 -type f | wc -l", WR_CACHE_DIR);
+	cmd[i] = '\0';
+
+	syscall_getRsp(cmd, file_number);
+	file_num_int = atoi(file_number);
+
+	if (file_num_int < WR_CACHE_THREE_QUARTERS)
+		return TRUE;
+	else
+		return FALSE;
+}
+
+bool_t is_backup_full(void){
+	char file_number[12], cmd[1024];
+	int file_num_int;
+	int i;
+
+	i = sprintf(cmd, "find %s -follow  -maxdepth 1 -type f | wc -l", WR_BACKUP_LOCATION);
+	cmd[i] = '\0';
+
+	syscall_getRsp(cmd, file_number);
+	file_num_int = atoi(file_number);
+
+	printf(" %d files in Backup storage \n", file_num_int);
+
+	if (file_num_int > WR_BACKUP_FULL)
+		return TRUE;
+	else
+		return FALSE;
+}
+
+bool_t is_backup_empty(void){
+	char file_number[12], cmd[1024];
+	int file_num_int;
+	int i;
+
+	i = sprintf(cmd, "find %s -follow  -maxdepth 1 -type f | wc -l", WR_BACKUP_LOCATION);
+	cmd[i] = '\0';
+
+	syscall_getRsp(cmd, file_number);
+	file_num_int = atoi(file_number);
+
+	if (file_num_int == 0)
+		return TRUE;
+	else
+		return FALSE;
+}
+
+bool_t is_backup_has_data(){
+	char file_number[12], cmd[1024];
+	int file_num_int;
+	int i;
+
+	i = sprintf(cmd, "find %s -follow  -maxdepth 1 -type f | wc -l", WR_BACKUP_LOCATION);
+	cmd[i] = '\0';
+
+	syscall_getRsp(cmd, file_number);
+	file_num_int = atoi(file_number);
+
+	if (file_num_int > 0)
+		return TRUE;
+	else
+		return FALSE;	
+}
+
+int info_write_cache(void){
+	char filename[32];
+	char tmp_time_now[15];
+	FILE* info_out;
+	char out_buff[4096], info_this_time[1024];
+	int curr_position=0, bytes_this_time=0;
+	int i;
+
+	syscall_getRsp("date +%Y%m%d%H%M%S", tmp_time_now);
+	tmp_time_now[14] = '\0';
+
+	//tmp_charP = tmp_time;
+	sprintf(filename, "%s%s.dat", WR_CACHE_DIR, tmp_time_now);
+
+	// output to a file
+	info_out = fopen(filename, "w");
+	if (info_out==NULL){
+		printf("Open fine=%s error !!\n", filename);
+		return -1;
+	}
+
+	// write into buffer
+	curr_position = 0;
+	bytes_this_time = 0;
+	bzero(out_buff, sizeof(out_buff));
+			
+	// prepare buff iterately
+	for(i=0;i<sys_inv_info_all.num;i++){
+		bzero(info_this_time, sizeof(info_this_time));
+				
+		daai_getEnergy(sys_inv_info_all.invInfo[i].invId, info_this_time, sizeof(info_this_time));
+		printf("Gonna output:%s \n", info_this_time);
+		bytes_this_time = sprintf(&out_buff[curr_position], "%s,%s###\n", tmp_time_now, info_this_time);
+		curr_position += bytes_this_time;
+	}
+
+	// write to file
+	fwrite(out_buff, sizeof(char), sizeof(out_buff), info_out);
+
+	//close file
+	fclose(info_out);
+
+	return 1;
+}
+
+
+int info_write_backup(void){
+	char filename[32];
+	char tmp_time_now[15];
+	FILE* info_out;
+	char out_buff[4096], info_this_time[1024];
+	int curr_position=0, bytes_this_time=0;	
+	int i;
+
+	syscall_getRsp("date +%Y%m%d%H%M%S", tmp_time_now);
+	tmp_time_now[14] = '\0';
+
+	//tmp_charP = tmp_time;
+	sprintf(filename, "%s%s.dat", WR_BACKUP_LOCATION, tmp_time_now);
+
+	// output to a file
+	info_out = fopen(filename, "w");
+	if (info_out==NULL){
+		printf("Open fine=%s error !!\n", filename);
+		return -1;
+	}
+
+	// write into buffer
+	curr_position = 0;
+	bytes_this_time = 0;
+	bzero(out_buff, sizeof(out_buff));
+			
+	// prepare buff iterately
+	for(i=0;i<sys_inv_info_all.num;i++){
+		bzero(info_this_time, sizeof(info_this_time));
+				
+		daai_getEnergy(sys_inv_info_all.invInfo[i].invId, info_this_time, sizeof(info_this_time));
+		printf("Gonna output:%s \n", info_this_time);
+		bytes_this_time = sprintf(&out_buff[curr_position], "%s,%s###\n", tmp_time_now, info_this_time);
+		curr_position += bytes_this_time;
+	}
+
+	// write to file
+	fwrite(out_buff, sizeof(char), sizeof(out_buff), info_out);
+
+	//close file
+	fclose(info_out);
+
+	return 1;
+}
+
+int info_snapshot_cache_to_backup(void){
+	FILE *readFileP;
+    char * line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    char fileToProcess[128];
+
+	// get a bunch of file names,
+
+	// save the list file
+	system("sh catInfoFiles.sh");
+
+	// start copy
+	readFileP = fopen("./cacheFileLists.txt", "r");
+	if (readFileP == NULL)
+		return -1;
+
+	puts("info_snapshot_cache_to_backup...");
+    while ((read = getline(&line, &len, readFileP)) != -1) {
+        //printf("Retrieved line of length %zu :\n", read);
+        //printf("%s", line);
+        line[read-1]='\0';
+        if(read>1){ // try to omit first line
+        	sprintf(fileToProcess, "cp %s%s %s", WR_CACHE_DIR, line, WR_BACKUP_LOCATION);
+        	system(fileToProcess);
+        }
+    }
+    puts("info_snapshot_cache_to_backup... Done !!");
+
+    if (line)
+        free(line);
+
+	fclose(readFileP);
+	return 1;
+}
+
+#if 0
+int info_snapshot_backup_to_cache(void){
+	FILE *readFileP;
+    char * line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    char fileToProcess[128];
+    int cnt=0;
+
+	// get a bunch of file names,
+
+	// save the list file
+	//system("sh catInfoFiles.sh");
+
+	// start copy
+	readFileP = fopen("./cacheFileLists.txt", "r");
+	if (readFileP == NULL)
+		return -1;
+
+	puts("info_snapshot_backup_to_cache...");
+    while ((read = getline(&line, &len, readFileP)) != -1) {
+        //printf("Retrieved line of length %zu :\n", read);
+        //printf("%s", line);
+        if(cnt >= WR_RESTORE_ENTRIES)
+        	break;
+
+        line[read-1]='\0';
+        if(read>1){ // try to omit first line
+        	sprintf(fileToProcess, "cp %s%s %s", WR_BACKUP_LOCATION, line, WR_CACHE_DIR);
+        	system(fileToProcess);
+        	sprintf(fileToProcess, "rm %s%s", WR_BACKUP_LOCATION, line);
+        	system(fileToProcess);
+        	printf("restore file:%s to cache!!\n", line);
+        }
+        
+        cnt ++;
+    }
+	puts("info_snapshot_backup_to_cache... Done !!");
+    
+    if (line)
+        free(line);
+
+	fclose(readFileP);
+	return 1;
+}
+#endif
+
+int info_snapshot_backup_to_cache(void){
+	FILE *readFileP;
+    char * line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    char fileToProcess[128];
+
+    char cmd[64];
+    int count = 0;
+
+	// create list
+	sprintf(cmd, "./listBackupNFileName.sh %d", WR_RESTORE_ENTRIES);
+	system(cmd);
+
+	
+	// read list
+	readFileP = fopen("./backup_n_list_name.log", "r");
+	if (readFileP == NULL)
+		return -1;
+
+	puts("move backup to cache...");
+    while ((read = getline(&line, &len, readFileP)) != -1) {
+        //printf("Retrieved line of length %zu :\n", read);
+        //printf("%s", line);
+        line[read-1]='\0';
+        //if(read>1){ // try to omit first line
+        sprintf(fileToProcess, "mv %s%s %s", WR_BACKUP_LOCATION, line, WR_CACHE_DIR);
+        system(fileToProcess);
+        //}
+        count ++;
+    }
+    printf("move %d files from backup into cache this time !", count);
+	// make move
+
+	return 1;
+}
+
+int info_snapshot_delete(void){
+	FILE *readFileP;
+    char * line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    char fileToProcess[128];
+
+	// get a bunch of file names,
+
+	// start copy
+	readFileP = fopen("./cacheFileLists.txt", "r");
+	if (readFileP == NULL)
+		return -1;
+
+	puts("info_snapshot_delete...");
+    while ((read = getline(&line, &len, readFileP)) != -1) {
+        //printf("Retrieved line of length %zu :\n", read);
+        //printf("%s", line);
+        line[read-1]='\0';
+        if(read>1){ // try to omit first line
+        	sprintf(fileToProcess, "rm %s%s", WR_BACKUP_LOCATION, line);
+        	system(fileToProcess);
+        }
+    }
+    puts("info_snapshot_delete... Done !!");
+
+    if (line)
+        free(line);
+
+	fclose(readFileP);
+
+	return 1;
+}
+
+int info_wr_state_chg_next(gBackupState_t* curr_backup_wr_cmd_state, gBackupEvent_t in_event){
+	
+	switch(*curr_backup_wr_cmd_state){
+		case SYS_INFO_INIT:
+				*curr_backup_wr_cmd_state = SYS_INFO_WR_CACHE;
+			break;
+
+    	case SYS_INFO_WR_CACHE:
+			if(in_event == EVNT_WR_BACKUP_HAS_DATA)
+				*curr_backup_wr_cmd_state = SYS_INFO_RESTORE_BACKUP_TO_CACHE;
+			else if(in_event == EVNT_WR_CACHE_FULL)
+				*curr_backup_wr_cmd_state = SYS_INFO_SNAPSHOT_CACHE_TO_BACKUP;
+			else
+				*curr_backup_wr_cmd_state = SYS_INFO_WR_CACHE;
+    		break;
+
+    	case SYS_INFO_SNAPSHOT_CACHE_TO_BACKUP:
+    		if(in_event == EVNT_WR_BACKUP_FULL)
+    			*curr_backup_wr_cmd_state = SYS_INFO_BACKUP_FULL;
+    		else
+    			*curr_backup_wr_cmd_state = SYS_INFO_WR_BACKUP;
+    		break;
+
+    	case SYS_INFO_WR_BACKUP:
+    		if(in_event == EVNT_WR_CACHE_AVAIL)
+    			*curr_backup_wr_cmd_state = SYS_INFO_DEL_CACHECOPY_IN_BACKUP;
+    		else if (in_event == EVNT_WR_BACKUP_FULL)
+    			*curr_backup_wr_cmd_state = SYS_INFO_BACKUP_FULL;
+    		else
+    			*curr_backup_wr_cmd_state = SYS_INFO_WR_BACKUP;
+    		break;
+
+    	case SYS_INFO_DEL_CACHECOPY_IN_BACKUP:
+    		*curr_backup_wr_cmd_state = SYS_INFO_RESTORE_BACKUP_TO_CACHE;
+    		break;
+
+    	case SYS_INFO_RESTORE_BACKUP_TO_CACHE:
+    		if(in_event == EVNT_WR_BACKUP_EMPTY)
+				*curr_backup_wr_cmd_state = SYS_INFO_WR_CACHE;
+			else if(in_event == EVNT_WR_CACHE_FULL)
+				*curr_backup_wr_cmd_state = SYS_INFO_WR_BACKUP;			
+			else if(in_event == EVNT_WR_BACKUP_HAS_DATA)
+				*curr_backup_wr_cmd_state = SYS_INFO_RESTORE_BACKUP_TO_CACHE;
+			else
+				*curr_backup_wr_cmd_state = SYS_INFO_RESTORE_BACKUP_TO_CACHE;
+    		break;
+
+    	case SYS_INFO_BACKUP_FULL:
+    		if(in_event == EVNT_WR_CACHE_AVAIL)
+    			*curr_backup_wr_cmd_state = SYS_INFO_DEL_CACHECOPY_IN_BACKUP;
+    		else if(in_event == EVNT_WR_BACKUP_AVAIL)
+    			*curr_backup_wr_cmd_state = SYS_INFO_WR_BACKUP;
+    		else
+    			*curr_backup_wr_cmd_state = SYS_INFO_BACKUP_FULL;
+    		break;
+		default:;
+		return -1;
+	}
+	return 1;
+}
+
+
+int motech_to_xml_schema_file(void* ptr){
+	char filename[32];
+	char tmp_time_now[15];
+	FILE* info_out;
+	char out_buff[4096], info_this_time[1024];
+	int curr_position=0, bytes_this_time=0;	
+	int i;
+
+	syscall_getRsp("date +%Y%m%d%H%M%S", tmp_time_now);
+	tmp_time_now[14] = '\0';
+
+	//tmp_charP = tmp_time;
+	sprintf(filename, "%s%s.dat", "./MOTECH_",tmp_time_now);
+
+	// output to a file
+	info_out = fopen(filename, "w");
+	if (info_out==NULL){
+		printf("Open fine=%s error !!\n", filename);
+		return -1;
+	}
+
+	// write into buffer
+	curr_position = 0;
+	bytes_this_time = 0;
+	bzero(out_buff, sizeof(out_buff));
+	bzero(info_this_time, sizeof(info_this_time));
+
+/*			
+	// prepare buff iterately
+	for(i=0;i<sys_inv_info_all.num;i++){
+		bzero(info_this_time, sizeof(info_this_time));
+				
+		daai_getEnergy(sys_inv_info_all.invInfo[i].invId, info_this_time, sizeof(info_this_time));
+		printf("Gonna output:%s \n", info_this_time);
+		bytes_this_time = sprintf(&out_buff[curr_position], "%s,%s###\n", tmp_time_now, info_this_time);
+		curr_position += bytes_this_time;
+	}
+*/
+
+#if 0
+	// output until site section
+	sprintf(info_this_time, "\<root\> 
+	\<site
+    database_type=\"SQL\"
+    table=\"raw_data_zlsh1\"
+    database=\"zlsh1\" 
+    pv_array=\"zlsh1\" 
+    daq_ip=\"192.168.1.224\" 
+    backup_interval=\"10\" 
+    rec_date=\"2012/04/29\" 
+    rec_time=\"03:49:40\" 
+    AvailPhy=\"65024000\"
+    sun_count=\"1\"
+    tm_count=\"3\" 
+    DC_count=\"4\"
+    AC_count=\"2\"
+    \>"
+    );
+#endif
+
+	// output site
+/*
+<root>
+  <site 
+    database_type="SQL" 
+    table="raw_data_zlsh1" 
+    database="zlsh1" 
+    pv_array="zlsh1" 
+    daq_ip="192.168.1.224" 
+    backup_interval="10" 
+    rec_date="2012/04/29" 
+    rec_time="03:49:40" 
+    AvailPhy="65024000"
+    sun_count="1"
+    tm_count="3" 
+    DC_count="4"
+    AC_count="2"
+    >
+*/
+	bytes_this_time = sprintf(&out_buff[curr_position], "<root>\n\
+  <site\n\
+    database_type=\"SQL\"\n\
+    table=\"raw_data_zlsh1\"\n\
+    database=\"zlsh1\"\n\
+    pv_array=\"zlsh1\"\n\
+    daq_ip=\"192.168.1.224\"\n\
+    backup_interval=\"10\"\n\
+    rec_date=\"2012/04/29\"\n\
+    rec_time=\"03:49:40\"\n\
+    AvailPhy=\"65024000\"\n\
+    sun_count=\"1\"\n\
+    tm_count=\"3\"\n\
+    DC_count=\"4\"\n\
+    AC_count=\"2\"\n\
+    >\n\n"
+    );
+	curr_position += bytes_this_time;
+
+	// output sun
+/*
+    <sun meter_index ="sun-01" inv_sn = "SN012345678"  sun="0" />
+*/
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <sun meter_index =\"sun-01\" inv_sn = \"SN012345678\"  sun=\"0\" />\n\n");
+	curr_position += bytes_this_time;
+
+	// output TM
+/*
+	<TM meter_index ="tm-01" inv_sn = "SN012345678"  tm="22.99" />
+*/
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <TM meter_index =\"tm-01\" inv_sn = \"SN012345678\"  tm=\"22.99\" />\n\n");
+	curr_position += bytes_this_time;
+
+	// output DCMeter
+/*
+    <DCMeter
+      meter_index="DC-02"
+      inv_sn = "SN012345677" 
+      Vdc="0.7" 
+      Idc="0"  
+      Pdc="0"
+      today_energy="99999" 
+      Edc="1811"  
+    />
+*/
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <DCMeter\n\
+      meter_index=\"DC-02\"\n\
+      inv_sn = \"SN012345677\"\n\
+      Vdc=\"0.7\"\n\
+      Idc=\"0\"\n\
+      Pdc=\"0\"\n\
+      today_energy=\"99999\"\n\
+      Edc=\"1811\"\n\
+    />\n\n");
+	curr_position += bytes_this_time;
+
+	// output ACMeter
+/*
+    <ACMeter  phase="1"
+      meter_index="AC-01"
+      inv_sn_a = "SN012345679" 
+      Vu_a="219.78" 
+      Iu_a="0.17" 
+      PF_a="2.23" 
+      Pu_a="-12.5" 
+      today_energy_a="99999"
+      Main_wh_a="5743.159" 
+      Negative_wh_a="63.232"
+      Hz="59.98"
+      Main_wh_total="5743.159"
+     />
+*/
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <ACMeter  phase=\"1\"\n\
+      meter_index=\"AC-01\"\n\
+      inv_sn_a = \"SN012345679\"\n\
+      Vu_a=\"219.78\"\n\
+      Iu_a=\"0.17\"\n\
+      PF_a=\"2.23\"\n\
+      Pu_a=\"-12.5\"\n\
+      today_energy_a=\"99999\"\n\
+      Main_wh_a=\"5743.159\"\n\
+      Negative_wh_a=\"63.232\"\n\
+      Hz=\"59.98\"\n\
+      Main_wh_total=\"5743.159\"\n\
+    />\n\n");
+	curr_position += bytes_this_time;     
+
+	// output terminator
+/*
+  </site>
+</root>
+*/	
+	bytes_this_time = sprintf(&out_buff[curr_position], "  </site>\n</root>");
+	curr_position += bytes_this_time;
+
+	// write to file
+	fwrite(out_buff, sizeof(char), sizeof(out_buff), info_out);
+
+	//test print
+	printf("OUT:%s\n", out_buff);
+
+	//close file
+	fclose(info_out);
+
+	return 1;
+}
+/*
+int generate_json_schema(void* ptr, char* rtn_string){
+	char out_buff[256]="";
+	int curr_p=0, tmp_count=0;
+
+	//Time=%s,InternalNet=%s,ExternalNet=%s,ExternalIP=%s,%s,ScanInterval=%d,ScanCapability=0x%04x,RebootLog
+	tmp_count = sprintf(out_buff, "{\n \
+  \"Time\": \"\",\
+  \"InternalNet\": \"\",\
+  \"ExternalNet\": \"\",\
+  \"ExternalIP\": \"\",\
+  \"ScanInterval\": \"\",\
+  \"ScanCapability\": \"\",\
+  \"ScanCapability\": \"\"\
+		",);
+	curr_p += tmp_count;
+}
+*/
+int generate_xml_schema_file(void* ptr){
+	char filename[32];
+	char tmp_time_now[15];
+	FILE* info_out;
+	char out_buff[4096], info_this_time[1024];
+	int curr_position=0, bytes_this_time=0;	
+	int i;
+	int sun_count=0, tm_count=0, supported_inv_count=0;
+	syscall_getRsp("date +%Y%m%d%H%M%S", tmp_time_now);
+	tmp_time_now[14] = '\0';
+
+	//tmp_charP = tmp_time;
+	sprintf(filename, "%s%s.dat", "./Schema_", tmp_time_now);
+
+	// output to a file
+	info_out = fopen(filename, "w");
+	if (info_out==NULL){
+		printf("Open fine=%s error !!\n", filename);
+		return -1;
+	}
+
+	// count supported inverters among all inverters
+	for(i=0; i<sys_inv_info_all.num; i++){
+		if(sys_inv_info_all.invInfo[i].invType == USE_DELTA)
+			supported_inv_count++;
+		
+		if(sys_inv_info_all.invInfo[i].invType == USE_PYRANOMETER)
+			sun_count++;
+
+		if((sys_inv_info_all.invInfo[i].invType == USE_THERMOMETER)||(sys_inv_info_all.invInfo[i].invType == USE_THERMOMETER))
+			tm_count++;
+	}
+
+	// write into buffer
+	curr_position = 0;
+	bytes_this_time = 0;
+	bzero(out_buff, sizeof(out_buff));
+	bzero(info_this_time, sizeof(info_this_time));
+ 	
+ 	syscall_getRsp(EXT_IP_CURL_ADDR, info_this_time);
+	info_this_time[15] = '\0';
+	// output site
+	bytes_this_time = sprintf(&out_buff[curr_position], "<root>\n\
+  <site\n\
+    database_type=\"SQL\"\n\
+    table=\"raw_data_zlsh1\"\n\
+    database=\"zlsh1\"\n\
+    pv_array=\"zlsh1\"\n\
+    daq_ip=\"%s\"\n\
+    backup_interval=\"%d\"\n\
+    rec_date=\"2012/04/29\"\n\
+    rec_time=\"03:49:40\"\n\
+    AvailPhy=\"65024000\"\n\
+    sun_count=\"%d\"\n\
+    tm_count=\"%d\"\n\
+    DC_count=\"%d\"\n\
+    AC_count=\"%d\"\n\
+    >\n\n", info_this_time, update_acs_interval*60, sun_count, tm_count, supported_inv_count, supported_inv_count
+    );
+	curr_position += bytes_this_time;
+
+	// output sun
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <sun meter_index =\"sun-01\" inv_sn = \"SN012345678\"  sun=\"0\" />\n\n");
+	curr_position += bytes_this_time;
+
+	// output TM
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <TM meter_index =\"tm-01\" inv_sn = \"SN012345678\"  tm=\"22.99\" />\n\n");
+	curr_position += bytes_this_time;
+
+	// output DCMeter
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <DCMeter\n\
+      meter_index=\"DC-02\"\n\
+      inv_sn = \"SN012345677\"\n\
+      Vdc=\"0.7\"\n\
+      Idc=\"0\"\n\
+      Pdc=\"0\"\n\
+      today_energy=\"99999\"\n\
+      Edc=\"1811\"\n\
+    />\n\n");
+	curr_position += bytes_this_time;
+
+	// output ACMeter
+	bytes_this_time = sprintf(&out_buff[curr_position], "    <ACMeter  phase=\"1\"\n\
+      meter_index=\"AC-01\"\n\
+      inv_sn_a = \"aaa\"\n\
+      Vu_a=\"219.78\"\n\
+      Iu_a=\"0.17\"\n\
+      PF_a=\"333\"\n\
+      Pu_a=\"0\"\n\
+      today_energy_a=\"99999\"\n\
+      Main_wh_a=\"5743.159\"\n\
+      Negative_wh_a=\"63.232\"\n\
+      Hz=\"59.98\"\n\
+      Main_wh_total=\"5743.159\"\n\
+    />\n\n");
+	curr_position += bytes_this_time;     
+
+	// output terminator
+	bytes_this_time = sprintf(&out_buff[curr_position], "  </site>\n</root>");
+	curr_position += bytes_this_time;
+
+	// write to file
+	fwrite(out_buff, sizeof(char), sizeof(out_buff), info_out);
+
+	//test print
+	printf("OUT:%s\n", out_buff);
+
+	//close file
+	fclose(info_out);
+
+	return 1;
+}
+
+
+
+int aging_list_fun(scan_inv_info_t* in_list, scan_inv_info_t* out_list, aging_list_t* aging_list){
+	int i;
+	uint8_t tmp_id=0;
+	scan_inv_info_t tmp_inv_info;	// for out_list
+	aging_element_t tmp_aging_element[256];
+	aging_list_t tmp_aging_list;	// for aging_list
+
+	//initialize
+	if(!in_list)
+		return -1;
+	if(!out_list)
+		return -1;
+	if(!aging_list)
+		return -1;
+
+	// 1. Merge
+	bzero(tmp_aging_element, sizeof(aging_element_t) * 256);
+	bzero(&tmp_inv_info, sizeof(scan_inv_info_t));
+	bzero(&tmp_aging_list, sizeof(aging_list_t));
+		
+		// 1.1 fill merge list with old list
+	for(i=0;i<aging_list->num;i++){
+		tmp_id = aging_list->aging_element[i].invId;
+		tmp_aging_element[tmp_id].invId = tmp_id;
+		tmp_aging_element[tmp_id].invType = aging_list->aging_element[i].invType;
+		tmp_aging_element[tmp_id].count = aging_list->aging_element[i].count + 1;
+		tmp_aging_element[tmp_id].needCheck = TRUE;
+	}
+
+		// 1.2 update merge list with new list
+	for(i=0;i<in_list->num;i++){
+		tmp_id = in_list->invInfo[i].invId;
+		tmp_aging_element[tmp_id].invId = tmp_id;
+		tmp_aging_element[tmp_id].invType = in_list->invInfo[i].invType;
+		tmp_aging_element[tmp_id].count = 1;
+		tmp_aging_element[tmp_id].needCheck = FALSE;
+	}	
+
+	// 2. plune, if this item is old enough, remove it !!
+	for(i=0; i<256; i++){
+		if(tmp_aging_element[i].needCheck){
+			if(tmp_aging_element[i].count > INV_SCAN_MISS_TIME_BEFORE_REMOVE)
+				bzero(&tmp_aging_element[i], sizeof(aging_element_t));
+		}
+	}
+
+	// 3. update tmp result 
+	tmp_aging_list.num = 0;
+	tmp_inv_info.num = 0;
+	for(i=0; i<256; i++){
+		if(tmp_aging_element[i].count != 0){
+			tmp_aging_list.aging_element[tmp_aging_list.num].needCheck = TRUE;
+			tmp_aging_list.aging_element[tmp_aging_list.num].count = tmp_aging_element[i].count;
+			tmp_aging_list.aging_element[tmp_aging_list.num].invId = tmp_aging_element[i].invId;
+			tmp_aging_list.aging_element[tmp_aging_list.num].invType = tmp_aging_element[i].invType;
+			tmp_aging_list.num ++;
+
+			tmp_inv_info.invInfo[tmp_inv_info.num].invId = tmp_aging_element[i].invId;
+			tmp_inv_info.invInfo[tmp_inv_info.num].invType = tmp_aging_element[i].invType;
+			tmp_inv_info.num ++;
+		}
+	}
+
+	// 4. write return
+	memcpy(aging_list, &tmp_aging_list, sizeof(aging_list_t));
+	memcpy(out_list, &tmp_inv_info, sizeof(scan_inv_info_t));
+
+	return 1;
+}
+
+void *thread_summary_scan_info(void *argu){
+	(void) argu;
+	int total_num, i;
+
+	puts("Start thread_summary_scan_info thread !!!");
+
+	while(1){
+		
+		//pthread_spin_lock(&scan_total_inv_lock);
+
+		sleep(update_acs_interval*60);
+		
+		printf("thread_summary_scan_info update !!!!");
+		
+		//printf("ch1_num=%d, ch2_num=%d, ch3_num=%d, ch4_num=%d \n", sys_inv_info_all1.num, sys_inv_info_all2.num, sys_inv_info_all3.num, sys_inv_info_all4.num);
+
+		total_num=0;
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_1)
+		printf("current ch1_num=%d\n", sys_inv_info_all1.num);
+		for(i=0 ; i < sys_inv_info_all1.num; i++){
+			sys_inv_info_all.invInfo[total_num+i].invId = sys_inv_info_all1.invInfo[i].invId + tmp_channel_info_p1->offset;
+			sys_inv_info_all.invInfo[total_num+i].invType = sys_inv_info_all1.invInfo[i].invType;
+		}
+		total_num = sys_inv_info_all1.num;
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_2)
+		printf("current ch2_num=%d\n", sys_inv_info_all2.num);
+		for(i=0; i < sys_inv_info_all2.num; i++){
+			sys_inv_info_all.invInfo[total_num+i].invId = sys_inv_info_all2.invInfo[i].invId + tmp_channel_info_p2->offset;
+			sys_inv_info_all.invInfo[total_num+i].invType = sys_inv_info_all2.invInfo[i].invType;
+		}
+		total_num += sys_inv_info_all2.num;
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_4)
+		printf("current ch4_num=%d\n", sys_inv_info_all3.num);
+		for(i=0; i < sys_inv_info_all3.num; i++){
+			sys_inv_info_all.invInfo[total_num+i].invId = sys_inv_info_all3.invInfo[i].invId + tmp_channel_info_p3->offset;
+			sys_inv_info_all.invInfo[total_num+i].invType = sys_inv_info_all3.invInfo[i].invType;
+		}
+		total_num += sys_inv_info_all3.num;
+#endif
+
+#if (ENABLE_INTERFACE&USE_INTERFACE_5)		
+		printf("current ch5_num=%d\n", sys_inv_info_all4.num);
+		for(i=0; i < sys_inv_info_all4.num; i++){
+			sys_inv_info_all.invInfo[total_num+i].invId = sys_inv_info_all4.invInfo[i].invId + tmp_channel_info_p4->offset;
+			sys_inv_info_all.invInfo[total_num+i].invType = sys_inv_info_all4.invInfo[i].invType;
+		}
+		total_num += sys_inv_info_all4.num;
+#endif
+
+		sys_inv_info_all.num = total_num;
+
+		printf("sys_inv_info_all.num = %d \n", sys_inv_info_all.num);
+		
+		//sleep(update_acs_interval*60);
+
+		puts("@SENPU_API:Before callBack");		
+			
+		if(xml_func_update)
+			xml_func_update(1);
+		
+	}
+}
+
+void *thread_handle_update_scan(void *argu){
+	char scan_port_name[64] = "";
+	int rtn;
+	sem_t* sem_invScan, *sem_waitInvScanFin;
+	scan_inv_info_t* sys_inv_info_all_local;
+	scan_inv_info_t sys_inv_info_all_new;
+	scan_channel_info_t* local_info = (scan_channel_info_t*) argu;
+	aging_list_t* aging_list_local_p;
+	eversolar_list_t** eversolar_list_head;
+
+	strcpy(scan_port_name, local_info->dev_name);
+	sem_invScan = local_info->sem_invScan_p;
+
+	aging_list_local_p = &(local_info->aging_list);
+
+	//printf("addr=%p\n", sem_invScan);
+
+	sem_waitInvScanFin = local_info->sem_waitInvScanFin_p;
+	sys_inv_info_all_local = local_info->scan_inv_info_p;
+	eversolar_list_head = &(local_info->list_head);
+
+	// end init
+
+	printf("Scan port =%s\n", scan_port_name);
+
+	//bzero(TYPE_ID_TABLE, sizeof(inv_type_id_t) * 256);
+	bzero(sys_inv_info_all_local, sizeof(scan_inv_info_t));
+	
+	while(1){
+		sem_wait(sem_invScan);
+		
+		rtn = inverter_scan_all(sys_inv_info_all_local, scan_port_name, eversolar_list_head);
+
+		if(rtn <0){
+			puts("Terminate this thread @scan");
+			pthread_exit((void *)3);
+		}
+		
+#ifdef USE_AGING_POLICY
+		bzero(&sys_inv_info_all_new, sizeof(scan_inv_info_t));
+		rtn = aging_list_fun(sys_inv_info_all_local, &sys_inv_info_all_new, aging_list_local_p);
+
+		printf("port:%s, update scan result: old_num=%d, new_num=%d \n", scan_port_name, sys_inv_info_all_local->num, sys_inv_info_all_new.num);
+
+		if(rtn>0)
+			memcpy(sys_inv_info_all_local, &sys_inv_info_all_new, sizeof(scan_inv_info_t));
+#endif 
+		sem_post(sem_waitInvScanFin);
+	}
+
+}
+
+void *thread_handle_manager_inverter(void *argu){
+	(void)argu;
+	int rtn;
+	scan_inv_info_t* sys_inv_info_all_local;
+	//int ret;
+	//char output_string[256];
+	struct timespec waitingTime;
+	int prob_count;
+	int i; 
+	uint16_t local_base, actual_id, curr_it;
+	char scan_port_name[64] = "";
+	scan_inv_info_t noUseData;
+	scan_inv_info_t sys_inv_info_enersolis, sys_inv_info_motech, sys_inv_info_ali, sys_inv_info_eversolar, sys_inv_info_delta;
+	sem_t* sem_invScan, *sem_waitInvScanFin;
+	scan_channel_info_t* local_info = (scan_channel_info_t*) argu;
+	eversolar_list_t** eversolar_list_head;
+
+	// init for this thread
+	
+	strcpy(scan_port_name, local_info->dev_name);
+	sem_invScan = local_info->sem_invScan_p;
+	sem_waitInvScanFin = local_info->sem_waitInvScanFin_p;
+	scan_port_name[strlen(scan_port_name)] = '\0';
+	sys_inv_info_all_local = local_info->scan_inv_info_p;
+	eversolar_list_head = &(local_info->list_head);
+	local_base = local_info->offset;
+	printf("Interface:%s\n", scan_port_name);
+
+	
+	// end init
+
+	//sem_init(sem_waitInvScanFin, 0, 0);
+
+	while(1){
+		// init
+		
+		// postscan
+		if(sys_status & STATUS_INV_AUTO_SCAN_ENABLE){
+			sem_post(sem_invScan);
+	
+			// timeout waiting for scan process to complete, or exit to go next 
+			clock_gettime(CLOCK_REALTIME, &waitingTime);
+			waitingTime.tv_sec += 480;
+			waitingTime.tv_nsec = 0;
+			sem_timedwait(sem_waitInvScanFin, &waitingTime);
+		}
+
+		// clear entire data to zero belongs to this channel
+		puts("try get lock of scan_total_inv_lock");
+		pthread_spin_lock(&scan_total_inv_lock);
+		bzero(&inverter_msg2host_motech_array[local_base], (sizeof(inverter_msg2host_new_t))*256);
+		bzero(&inverter_msg2host_ali_array[local_base], (sizeof(inverter_ali_raw_t))*256);
+		bzero(&inverter_msg2host_eversolar_array[local_base], (sizeof(inverter_msg2host_eversolar_t))*256);
+		bzero(&inverter_msg2host_delta_array[local_base], (sizeof(inverter_msg2host_delta_t))*256);
+		bzero(&inverter_msg2host_enersolis_array[local_base], (sizeof(inverter_enersolis_raw_t))*256);
+		puts("release lock of scan_total_inv_lock");
+		pthread_spin_unlock(&scan_total_inv_lock);
+
+		// do it 10 times before enter re-scan inverter
+		for(i=0;i<10;i++){
+			// post read 
+
+			// check manual inverter scan from ACS
+			if(sys_status & STATUS_INV_FORCE_SCAN){
+				// timeout waiting for scan process to complete, or exit to go next 
+				sem_post(sem_invScan);
+				
+				clock_gettime(CLOCK_REALTIME, &waitingTime);
+				waitingTime.tv_sec += 480;
+				waitingTime.tv_nsec = 0;
+				sem_timedwait(sem_waitInvScanFin, &waitingTime);
+				
+				// mark sys_status the scan bit
+				sys_status = sys_status & ~STATUS_INV_FORCE_SCAN;
+				
+				sleep(3);
+				
+				// clear entire data to zero belongs to this channel
+				puts("try get lock of scan_total_inv_lock");
+				pthread_spin_lock(&scan_total_inv_lock);
+				bzero(&inverter_msg2host_motech_array[local_base], (sizeof(inverter_msg2host_new_t))*256);
+				bzero(&inverter_msg2host_ali_array[local_base], (sizeof(inverter_ali_raw_t))*256);
+				bzero(&inverter_msg2host_eversolar_array[local_base], (sizeof(inverter_msg2host_eversolar_t))*256);
+				bzero(&inverter_msg2host_delta_array[local_base], (sizeof(inverter_msg2host_delta_t))*256);
+				bzero(&inverter_msg2host_enersolis_array[local_base], (sizeof(inverter_enersolis_raw_t))*256);
+				puts("release lock of scan_total_inv_lock");
+				pthread_spin_unlock(&scan_total_inv_lock);				
+			}
+
+			if(scan_inv_types & (USE_PYRANOMETER|USE_THERMOMETER|USE_THERMOGRAPH)){
+				rtn = inverter_scan_pyranometer(&noUseData, scan_port_name, local_base);
+				if(rtn <0){
+					puts("Terminate this thread");
+					pthread_exit((void *)3);
+				}
+			}
+
+
+			if(scan_inv_types & USE_MOTECH){
+				prob_count = 0;
+
+				// clear all
+				bzero(&sys_inv_info_motech, sizeof(scan_inv_info_t));
+
+				// get amount
+				getSubSetInvInfo(sys_inv_info_all_local, USE_MOTECH, &sys_inv_info_motech);
+
+				while(prob_count < sys_inv_info_motech.num){
+					// time to run inv_scan ??
+					curr_it = sys_inv_info_motech.invInfo[prob_count].invId;
+					actual_id = local_base + curr_it;
+					rtn = invInfoGet_Motech(actual_id, &inverter_msg2host_motech_array[actual_id], scan_port_name);
+					
+					if(rtn <0){
+						puts("Terminate this thread");
+						pthread_exit((void *)3);
+					}
+
+					printf("update MOTEHC inv data into slot #%d\n", curr_it);
+					
+					prob_count ++;	
+				}
+			}
+
+			if(scan_inv_types & USE_TOUGH){
+				prob_count = 0;
+				// clear all
+				bzero(&sys_inv_info_ali, sizeof(scan_inv_info_t));
+
+				// get amount
+				getSubSetInvInfo(sys_inv_info_all_local, USE_TOUGH, &sys_inv_info_ali);
+
+				while(prob_count < sys_inv_info_ali.num){
+					// time to run inv_scan ??
+					curr_it = sys_inv_info_ali.invInfo[prob_count].invId;
+					actual_id = local_base + curr_it;
+					rtn = invInfoGet_Ali(actual_id, &inverter_msg2host_ali_array[actual_id], scan_port_name);
+					
+					if(rtn <0){
+						puts("Terminate this thread");
+						pthread_exit((void *)3);
+					}		
+					printf("update TOUGH inv data into slot #%d\n", curr_it);
+					
+					prob_count ++;	
+				}
+			}
+
+			if(scan_inv_types & USE_EVERSOLAR){
+				prob_count = 0;
+				// clear all
+				bzero(&sys_inv_info_eversolar, sizeof(scan_inv_info_t));
+
+				// get amount
+				getSubSetInvInfo(sys_inv_info_all_local, USE_EVERSOLAR, &sys_inv_info_eversolar);
+
+				while(prob_count < sys_inv_info_eversolar.num){
+					// time to run inv_scan ??
+					curr_it = sys_inv_info_eversolar.invInfo[prob_count].invId;
+					actual_id = local_base + curr_it;
+					rtn = invInfoGet_Eversolar(actual_id, &inverter_msg2host_eversolar_array[actual_id], FALSE, scan_port_name, eversolar_list_head);
+					
+					if(rtn <0){
+						puts("Terminate this thread");
+						pthread_exit((void *)3);
+					}
+
+					printf("update EVERSOLAR inv data into slot #%d\n", curr_it);
+					
+					prob_count ++;	
+				}
+			}
+			
+			if(scan_inv_types & USE_DELTA){
+				prob_count = 0;
+
+				// clear all
+				bzero(&sys_inv_info_delta, sizeof(scan_inv_info_t));
+
+				// get amount
+				getSubSetInvInfo(sys_inv_info_all_local, USE_DELTA, &sys_inv_info_delta);
+
+				while(prob_count < sys_inv_info_delta.num){
+					// time to run inv_scan ??
+					curr_it = sys_inv_info_delta.invInfo[prob_count].invId;
+					actual_id = local_base + curr_it;
+					rtn = invInfoGet_Delta(actual_id, &inverter_msg2host_delta_array[actual_id], scan_port_name);
+					
+					if(rtn <0){
+						puts("Terminate this thread");
+						pthread_exit((void *)3);
+					}
+					//getEnergyGet_delta(sys_inv_info_delta.addr[prob_count], &inverter_msg2host_delta_array[sys_inv_info_delta.addr[prob_count]]);		
+						
+					printf("update DELTA inv data into slot #%d\n", curr_it);
+					
+					prob_count ++;	
+				}
+			}
+
+			if(scan_inv_types & USE_ENERSOLIS){
+				prob_count = 0;
+
+				// clear all
+				bzero(&sys_inv_info_enersolis, sizeof(scan_inv_info_t));
+
+				// get amount
+				getSubSetInvInfo(sys_inv_info_all_local, USE_ENERSOLIS, &sys_inv_info_enersolis);
+
+				// 
+				while(prob_count < sys_inv_info_enersolis.num){
+					// time to run inv_scan ??
+					curr_it = sys_inv_info_enersolis.invInfo[prob_count].invId;
+					actual_id = local_base + curr_it;					
+					rtn = invInfoGet_EnerSolis(actual_id, &inverter_msg2host_enersolis_array[actual_id], scan_port_name);
+					
+					if(rtn <0){
+						puts("Terminate this thread");
+						pthread_exit((void *)3);
+					}	
+
+					printf("update ENERSOLIS inv data into slot #%d\n", curr_it);
+					
+					prob_count ++;	
+				}
+			}
+
+
+#ifdef USE_FILE_STYLE_INFO_OUTPUT
+			char cmd[64];
+			char file_number[32];
+			int file_num_int;			
+
+			// how to write info this time
+			switch(curr_wr_state){
+				case SYS_INFO_INIT:
+					puts("Current state = SYS_INFO_INIT");
+					// execute
+					info_write_cache();
+
+					// next state
+					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_JUST_GO);
+					break;
+    			case SYS_INFO_WR_CACHE:
+					puts("Current state = SYS_INFO_WR_CACHE");    			
+    				// execute
+    				info_write_cache();
+
+    				// next state
+    				if(is_cache_full())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_CACHE_FULL);
+    				else if(is_backup_has_data() && is_cache_avail())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_BACKUP_HAS_DATA);
+    				break;
+
+    			case SYS_INFO_SNAPSHOT_CACHE_TO_BACKUP:
+					puts("Current state = SYS_INFO_SNAPSHOT_CACHE_TO_BACKUP");    			
+    				// execute
+    				info_write_backup();
+    				info_snapshot_cache_to_backup();
+    				
+    				// next state
+    				if(is_backup_full())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_BACKUP_FULL);
+    				else
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_JUST_GO);
+    				break;
+
+    			case SYS_INFO_WR_BACKUP:
+					puts("Current state = SYS_INFO_WR_BACKUP");    			
+    				// execute
+    				info_write_backup();
+
+    				// next state
+    				if(is_backup_full())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_BACKUP_FULL);
+    				else if(is_cache_avail())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_CACHE_AVAIL);
+    				else
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_JUST_GO);
+    				break;
+
+    			case SYS_INFO_DEL_CACHECOPY_IN_BACKUP:
+					puts("Current state = SYS_INFO_DEL_CACHECOPY_IN_BACKUP");    			
+    				// execute
+    				info_write_cache();
+    				info_snapshot_delete();
+
+    				// next state
+   					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_JUST_GO);
+    				break;
+
+    			case SYS_INFO_RESTORE_BACKUP_TO_CACHE:
+					puts("Current state = SYS_INFO_RESTORE_BACKUP_TO_CACHE");    			
+    				// execute
+    				info_write_cache();
+    				info_snapshot_backup_to_cache();
+
+    				// next state
+    				if(is_backup_empty())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_BACKUP_EMPTY);
+    				else if(!is_cache_avail())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_CACHE_FULL);
+    				else if(is_backup_has_data())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_BACKUP_HAS_DATA);
+    				else
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_JUST_GO);
+    				break;
+
+    			case SYS_INFO_BACKUP_FULL:
+					puts("Current state = SYS_INFO_BACKUP_FULL");    			
+    				// execute
+    				// next state
+    				if(is_cache_avail())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_CACHE_AVAIL);
+    				else if (!is_backup_full())
+    					info_wr_state_chg_next(&curr_wr_state, EVNT_WR_BACKUP_AVAIL);
+
+    				puts("Error !! backup storage (SD card) full !!");
+    				break;	
+				default:;
+			}
+
+			i = sprintf(cmd, "find %s -follow  -maxdepth 1 -type f | wc -l", WR_BACKUP_LOCATION);
+			cmd[i] = '\0';
+			syscall_getRsp(cmd, file_number);
+			file_num_int = atoi(file_number);
+			printf("current status backup has %d files, ", file_num_int);
+
+			i = sprintf(cmd, "find %s -follow  -maxdepth 1 -type f | wc -l", WR_CACHE_DIR);
+			cmd[i] = '\0';
+			syscall_getRsp(cmd, file_number);
+			file_num_int = atoi(file_number);
+			printf("cache has %d files\n", file_num_int);			
+			// get current time
+#endif
+
+			// sleep
+			if(sys_inv_info_all_local->num < 10){
+				sleep(10);
+				//sleep(60 * update_acs_interval);
+			}
+			else if(sys_inv_info_all_local->num < 30){ // 120 secs in gothering inv data
+				sleep(5);
+				//sleep(45 * update_acs_interval);
+			}
+			else if(sys_inv_info_all_local->num < 50){ // 200 secs in gothering inv data
+				sleep(3);
+				//sleep(40 * update_acs_interval);
+			}
+			else if(sys_inv_info_all_local->num < 100){ // 400 secs in gothering inv data
+				sleep(3);
+				//sleep(30 * update_acs_interval);
+			}
+/*			
+			puts("@SENPU_API:Before callBack");		
+			
+			if(xml_func_update)
+				xml_func_update(1);
+*/	
+			//puts("@SENPU_API:After callBack");		
+	
+			sleep(5);
+		}
+	}	
+}
+
+int rdnt_send_pkt(char* access_bus_name, redundant_pkt_req* in_pkt, int fd_rs485){
+	char rcv_buff[128];
+	uint8_t rs232_timeout;
+	uint16_t rtn_fcs;
+	redundant_pkt_rsp* tmp_rsp_p;
+	int size_to_read, bytes;
+	int rty_time=0;
+
+	// 1.get access priviledge
+	puts("Try to get channel access priviledge!!");
+	
+  	if(fd_rs485 < 0){
+  		printf("port %s failed !!", access_bus_name);
+  		return -1;
+  	}
+
+	in_pkt->FCS = append_FCS_add(in_pkt, sizeof(redundant_pkt_req)-2);
+
+  	bytes = write(fd_rs485, in_pkt, sizeof(redundant_pkt_req));
+
+	return bytes;
+}
+
+
+int rdnt_receive_pkt(char* access_bus_name, char* rtn_pkt, int fd_rs485, redundant_pkt_rsp* rtn_pkt_slot){
+	char rcv_buff[256];	
+	uint8_t rs232_timeout;
+	uint16_t calculated_fcs;
+	redundant_pkt_rsp* tmp_rsp_p;
+	int size_to_read, bytes;
+	uint8_t* bufptr;
+	int rty_time=0;
+	int total_bytes, i, valid_pkt_num=0;
+
+  		if(fd_rs485 < 0){
+  			printf("port %s failed !!", access_bus_name);
+  			return -1;
+  		}
+  		printf("Current fd = %d\n", fd_rs485);
+	// 2.wait for period of time, listening to any possible Host
+  		bufptr = rcv_buff;
+
+		size_to_read = 128;//sizeof(redundant_pkt_rsp);
+		total_bytes = 0;
+		while(1){
+			
+			if(rty_time==6){
+	  			//rs232_timeout=TRUE;
+	  			puts("Timeout");
+	  			rs232_timeout=INV_MSG_CRASH;
+	  			break;
+	  		}
+			
+			// read it !!
+	  	 	bytes = read(fd_rs485, (char*)bufptr, size_to_read);	// it will always receive
+			bufptr += bytes;
+			size_to_read -= bytes;
+			total_bytes +=bytes;
+			printf("receive %d, size_to_read = %d, total %d\n", bytes, size_to_read, sizeof(redundant_pkt_rsp) - size_to_read);
+			// check satisfy
+
+			usleep(WAITING_TIME_EACH_RETRY); //0.4 s
+
+			if(size_to_read <= 0){
+				rs232_timeout=FALSE;
+				puts("Receive data reach limit !!");
+				break;
+			}
+
+			rty_time ++;
+		}
+
+		i=0;
+		while(i<total_bytes){
+			printf("0x%2x ", rcv_buff[i]);
+			i++;
+		}
+		puts(" ");
+
+		// search entire buffer for valid prefix
+		for(i=0; i < total_bytes; i++){
+			if(rcv_buff[i] == 0xaa){
+				if(rcv_buff[i+1] == 0x55){
+					calculated_fcs = append_FCS_add(&rcv_buff[i], sizeof(redundant_pkt_rsp)-2);
+					tmp_rsp_p = (redundant_pkt_rsp*)&rcv_buff[i];
+					if(tmp_rsp_p->FCS == calculated_fcs){
+						puts("We receive one valid packet !!");
+						if(valid_pkt_num>=MAX_NUM_RDNT_GW){
+							puts("RDNT gateway on the bus reaches the limit");	
+							return valid_pkt_num;
+						}
+						memcpy(&rtn_pkt_slot[valid_pkt_num], &rcv_buff[i], sizeof(redundant_pkt_rsp));
+						valid_pkt_num ++;
+						printf("Inside, valid_pkt_num=%d\n", valid_pkt_num);
+					}
+				}
+			}
+		}
+		return valid_pkt_num;
+}
+		
+
+void *thread_redundant_host_control(void *argu){
+
+	redundant_t* local_info = (redundant_t*) argu;
+	bool_t local_enable = local_info->enable;
+	uint8_t local_state = local_info->state;
+	//sem_t* local_ctrl_lock_p = local_info->ctrl_lock_p;
+	//sem_t* local_recv_lock_p = local_info->recv_lock_p;
+	int bytes;
+	int rty_time=0;
+	int fd_rs485;
+	char rtn_pkt[128];
+	char rtn_one_byte;
+	redundant_pkt_rsp rtn_pkt_slot[MAX_NUM_RDNT_GW];
+	redundant_pkt_rsp rsp_pkt_out;
+	redundant_pkt_req req_pkt_out;
+	redundant_pkt_rsp* tmp_rtn_p;
+	local_state = RDNT_STATE_IDLE;
+	int tmp_int, cnt, rtn_pkt_valid_num=0;
+	int i, j;
+	int usec2send=1;
+	bool_t takecontrol=FALSE;
+	bool_t losecontrol=FALSE;
+	int winCntBeforeTaken = 0;
+	bool_t win=FALSE;
+	uint8_t tmp_byte;
+
+	rsp_pkt_out.prefix = 0x55aa;
+	rsp_pkt_out.host_level = local_info->host_level;
+	memcpy(rsp_pkt_out.unique_name, local_info->unique_name, sizeof(local_info->unique_name));
+
+	req_pkt_out.prefix = 0x55aa;
+	req_pkt_out.host_level = local_info->host_level;
+	memcpy(req_pkt_out.unique_name, local_info->unique_name, sizeof(local_info->unique_name));
+
+	fd_rs485 = open_port_RS485(local_info->access_bus_name, O_RDWR| O_NOCTTY);
+  	if(fd_rs485 < 0){
+  		printf("Open port %s failed !!", local_info->access_bus_name);
+  		return -1;
+  	}
+
+	rsp_pkt_out.rsp = 0x11;
+
+	while(1){
+	//	sem_wait(local_recv_lock_p);
+	//
+	// Update current state
+	//
+		//update rsp packet
+		bzero(rtn_pkt, sizeof(rtn_pkt));
+		switch(local_info->state) {
+			case RDNT_STATE_IDLE: 
+				puts("Redundant State = IDLE");
+
+				// set Leds
+				system("./setLedBright.sh");
+ 
+				// receive pkt
+				if((rtn_pkt_valid_num = rdnt_receive_pkt(local_info->access_bus_name, rtn_pkt, fd_rs485, rtn_pkt_slot)) >0){
+					tmp_rtn_p = rtn_pkt;
+					printf("get return prefix=%x, name=%s, host_level=%x, rsp=%x, FCS=%x\n", tmp_rtn_p->prefix, tmp_rtn_p->unique_name, tmp_rtn_p->host_level, tmp_rtn_p->host_level, tmp_rtn_p->FCS);
+					puts("send RSP back !!");
+
+					// we make 32ms a slot, since it takes 17.6ms to send 22bytes on 9600bps
+					// create 30 slots
+					usec2send = rand()%30 +1;
+					usec2send <<=15;
+					usleep(usec2send);
+					rdnt_send_pkt(local_info->access_bus_name, &rsp_pkt_out, fd_rs485);
+					local_info->state = RDNT_STATE_STANDBY;
+				}
+				else{
+					puts("No any data received !!");
+					local_info->state = RDNT_STATE_STANDBY;
+				}
+				break;
+				
+			case RDNT_STATE_STANDBY: 
+				puts("Redundant State = RDNT_STATE_STANDBY");
+				// set Leds
+				if(local_info->host_level>2)
+					system("./setLedTimer1.sh");
+				else
+					system("./setLedTimer2.sh");
+				
+				winCntBeforeTaken = 0;
+				while(winCntBeforeTaken<3){
+					// 1.waiting for data, if we get valid packet, send back, if not, adv count before going into next state
+					if((rtn_pkt_valid_num = rdnt_receive_pkt(local_info->access_bus_name, rtn_pkt, fd_rs485, rtn_pkt_slot)) >0){
+						printf("Valid pkt num=%d\n", rtn_pkt_valid_num);
+						takecontrol=FALSE;
+						for(i=0;i<rtn_pkt_valid_num;i++){
+							tmp_rtn_p = (redundant_pkt_rsp*)&rtn_pkt_slot[i];
+							printf("get return prefix=%x, name=%s, host_level=%x, rsp=%x, FCS=%x\n", tmp_rtn_p->prefix, tmp_rtn_p->unique_name, tmp_rtn_p->host_level, tmp_rtn_p->rsp, tmp_rtn_p->FCS);
+							if(local_info->host_level >= tmp_rtn_p->host_level){
+								takecontrol=FALSE;
+								winCntBeforeTaken = 0;
+								printf("count down %d to go CONTEND\n", 3-winCntBeforeTaken);
+								rsp_pkt_out.rsp = RDNT_RSP_STANDBY;
+								break;
+							}
+							else{
+								takecontrol=TRUE;
+								winCntBeforeTaken ++;
+								printf("count down %d to go CONTEND\n", 3-winCntBeforeTaken);
+								rsp_pkt_out.rsp = RDNT_RSP_CONTEND;
+							}
+						}
+
+						puts("send RSP back !!");
+						// create 30 slots
+						usec2send = rand()%30 +1;
+						usec2send <<=15;
+						usleep(usec2send);
+						rdnt_send_pkt(local_info->access_bus_name, &rsp_pkt_out, fd_rs485);
+						
+						if(takecontrol)
+							local_info->state = RDNT_STATE_CONTEND;
+						else
+							local_info->state = RDNT_STATE_STANDBY;
+					}
+					else{
+						puts("No any data received !!");
+						winCntBeforeTaken++;
+						printf("count down %d to go CONTEND\n", 3-winCntBeforeTaken);
+						local_info->state = RDNT_STATE_CONTEND;
+					}
+				}			
+				break;	
+			
+			case RDNT_STATE_CONTEND: 
+				puts("Redundant State = CONTEND");
+
+				//set Leds
+				system("./setLedRepeat.sh");
+				winCntBeforeTaken = 0;
+				for(i=0;i<3;i++){
+					sleep(2);
+					// 1.random wait, we make 32ms a slot, since it takes 17.6ms to send 22bytes on 9600bps, create 30 slots
+					usec2send = rand()%30 +1;
+					usec2send <<=15;
+					usleep(usec2send);					
+					// 2.Issue cmd with contend
+					req_pkt_out.cmd = RDNT_CMD_CONTEND | (rand()%16);
+					rdnt_send_pkt(local_info->access_bus_name, &req_pkt_out, fd_rs485);
+					// 3.wait response
+					win=TRUE;
+					if( (rtn_pkt_valid_num = rdnt_receive_pkt(local_info->access_bus_name, rtn_pkt, fd_rs485, rtn_pkt_slot)) >0){
+						if(rtn_pkt_valid_num <= 0)	// no any other rdnt
+							win=TRUE;
+						else{	// there're other rdnts
+							for(j=0;j<rtn_pkt_valid_num;j++){
+								tmp_rtn_p = (redundant_pkt_rsp*)&rtn_pkt_slot[j];
+								printf("get return name=%s, host_level=%x, cmd=%x\n", tmp_rtn_p->unique_name, tmp_rtn_p->host_level, tmp_rtn_p->rsp);
+								if(local_info->host_level > tmp_rtn_p->host_level){
+									win=FALSE;
+									break;
+								}else if(local_info->host_level == tmp_rtn_p->host_level){
+									if( (tmp_rtn_p->rsp)&0xf0 == RDNT_CMD_HOST){
+										win=FALSE;
+										break;
+									}
+									else if((tmp_rtn_p->rsp)&0x0f > 0x07)
+										win=TRUE;
+									else
+										win=FALSE;
+								}
+								else
+									win=TRUE;
+							}
+						}
+					}		
+					// 4.check result
+					if(win){
+						printf("#%d, win \n", i);
+						winCntBeforeTaken++;
+						system("./setLedRepeat2.sh");
+					}else{
+						printf("#%d, lose \n", i);
+						system("./setLedRepeat.sh");
+					}
+
+					if(winCntBeforeTaken>1){
+						local_info->state = RDNT_STATE_HOST;
+						break;
+					}else
+						local_info->state = RDNT_STATE_STANDBY;
+				}
+				break;
+
+			case RDNT_STATE_HOST: 
+				puts("Redundant State = HOST");
+				
+				//set Leds
+				system("./setLedHeartbeat.sh");
+
+				while(1){
+/*
+					scanf("%d", &tmp_int);
+					if(tmp_int==1)
+						continue;
+					else if(tmp_int==2)
+						break;
+*/
+					// 1.clear buffer before receive
+					bytes = 1;
+					cnt=0;
+					while(bytes >0){
+						bytes = read(fd_rs485, &rtn_one_byte, 1);
+						puts("Clear data on fd_rs485!!");
+					}
+
+					// 2.issue command
+					req_pkt_out.cmd = RDNT_CMD_HOST;
+					rdnt_send_pkt(local_info->access_bus_name, &req_pkt_out, fd_rs485);
+
+					// 3.receive pkt
+					if( (rtn_pkt_valid_num = rdnt_receive_pkt(local_info->access_bus_name, rtn_pkt, fd_rs485, rtn_pkt_slot)) >0){
+						printf("Valid pkt num=%d\n", rtn_pkt_valid_num);
+						losecontrol=FALSE;
+						for(i=0;i<rtn_pkt_valid_num;i++){
+							tmp_rtn_p = (redundant_pkt_rsp*)&rtn_pkt_slot[i];
+							printf("get return prefix=%x, name=%s, host_level=%x, rsp=%x, FCS=%x\n", tmp_rtn_p->prefix, tmp_rtn_p->unique_name, tmp_rtn_p->host_level, tmp_rtn_p->rsp, tmp_rtn_p->FCS);
+							if(local_info->host_level > tmp_rtn_p->host_level){
+								tmp_byte = tmp_rtn_p->rsp;
+								if(tmp_rtn_p->rsp==RDNT_RSP_CONTEND){
+									losecontrol=TRUE;
+									break;
+								}
+								if(tmp_rtn_p->rsp==RDNT_CMD_HOST){
+									losecontrol=TRUE;
+									break;
+								}								
+								/*
+								tmp_byte = (tmp_rtn_p->rsp)&0xf0;
+								if(tmp_byte==RDNT_CMD_CONTEND){
+									losecontrol=TRUE;
+									break;
+								}
+								*/
+							}else if(local_info->host_level == tmp_rtn_p->host_level){
+								if(tmp_rtn_p->rsp == RDNT_CMD_HOST){
+									losecontrol=TRUE;
+									break;
+								}
+							}
+						}
+						if(losecontrol){
+							local_info->state = RDNT_STATE_CONTEND;
+							break;
+						}
+						else{
+							local_info->state = RDNT_STATE_HOST;
+							break;
+						}
+					}
+					else{
+						puts("No any data received !!");
+						local_info->state = RDNT_STATE_HOST;
+					}
+					sleep(1);
+				}
+				break;					
+			default: ;
+		}
+
+		//sleep(6);
+
+		//sem_post(local_ctrl_lock_p);
+	}
+	close(fd_rs485);
+}
+

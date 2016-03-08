@@ -1,0 +1,1 @@
+Tele=No3G,Ccid=No3G,Rssi=No3G
